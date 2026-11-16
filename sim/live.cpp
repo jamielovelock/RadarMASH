@@ -62,10 +62,11 @@ void Live::run() {
 
 void Live::poll() {
   std::string url, ua, url_before;
-  double lat, lon; bool ground;
+  double lat, lon; bool ground; int limit;
   {
     std::lock_guard<std::mutex> lock(*mu_);
     url = url_before = feed_url; ua = user_agent; lat = radar_->home_lat; lon = radar_->home_lon; ground = include_ground;
+    limit = radar_->set.max_aircraft < 1 ? 1 : radar_->set.max_aircraft > MAX_AIRCRAFT ? MAX_AIRCRAFT : radar_->set.max_aircraft;
     char num[32];
     snprintf(num, sizeof num, "%.4f", lat); replaceAll(url, "{lat}", num);
     snprintf(num, sizeof num, "%.4f", lon); replaceAll(url, "{lon}", num);
@@ -74,7 +75,7 @@ void Live::poll() {
   std::string body;
   bool got = httpGet(url, ua, body);
   std::vector<Aircraft> fresh(MAX_AIRCRAFT);
-  int n = got ? parseAircraft(body.data(), body.size(), lat, lon, ground, fresh.data(), MAX_AIRCRAFT) : -1;
+  int n = got ? parseAircraft(body.data(), body.size(), lat, lon, ground, fresh.data(), limit) : -1;
 
   std::lock_guard<std::mutex> lock(*mu_);
   if (n < 0) {

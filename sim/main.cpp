@@ -145,7 +145,7 @@ button{font:inherit;margin:14px 6px;padding:8px 16px} label{margin:0 8px;white-s
  brightness <input id=mb type=range min=0 max=100 style="vertical-align:middle;width:90px"> <button id=ma style="margin:4px">Apply</button>
  <span id=mi></span></div>
 <div id=f>Aircraft feed <select id=fu><option value="https://opendata.adsb.fi/api/v3/lat/{lat}/lon/{lon}/dist/{nm}">adsb.fi<option value="https://api.adsb.lol/v2/point/{lat}/{lon}/{nm}">adsb.lol</select>
- refresh every <input id=fr type=number min=2 max=300 style="width:4em"> s
+ refresh every <input id=fr type=number min=2 max=300 style="width:4em"> s, show at most <input id=fm type=number min=1 max=64 style="width:4em"> nearest
  <label><input id=fg type=checkbox> on the ground</label> <button id=fa style="margin:4px">Apply</button> <span id=fi></span></div>
 <small>Short press: next aircraft. Long press: next range (zoom). Auto-cycle moves on every 5 s. <span id=dm>Demo traffic runs 20x faster than life.</span></small>
 <script>
@@ -160,9 +160,9 @@ function mapInfo(fill){fetch('/mapinfo').then(r=>r.json()).then(j=>{if(fill){$('
 $('mi').textContent='range '+j.range+' km, zoom '+j.zoom+(j.missing?', '+j.missing+' tiles missing':'')})}
 function mapApply(){fetch('/map?url='+encodeURIComponent($('mu').value)+'&credit='+encodeURIComponent($('mc').value)+'&style='+$('ms').value+'&bright='+$('mb').value).then(()=>setTimeout(mapInfo,1500))}
 $('ma').onclick=mapApply;$('ms').onchange=mapApply;$('mb').onchange=mapApply;mapInfo(true);setInterval(mapInfo,3000);
-function feedInfo(fill){fetch('/feedinfo').then(r=>r.json()).then(j=>{if(fill){$('fr').value=j.refresh;$('fg').checked=j.ground}
+function feedInfo(fill){fetch('/feedinfo').then(r=>r.json()).then(j=>{if(fill){$('fr').value=j.refresh;$('fm').value=j.max;$('fg').checked=j.ground}
 $('fu').value=j.url;$('f').style.display=j.live?'':'none';$('dm').style.display=j.live?'none':'';$('fi').textContent=j.count<0?'waiting for the first reply':j.count+' aircraft, updated '+j.age+' s ago'+(j.error?' ('+j.error+')':'')})}
-$('fa').onclick=()=>fetch('/feed?url='+encodeURIComponent($('fu').value)+'&refresh='+$('fr').value+'&ground='+($('fg').checked?1:0)).then(()=>feedInfo());
+$('fa').onclick=()=>fetch('/feed?url='+encodeURIComponent($('fu').value)+'&refresh='+$('fr').value+'&max='+$('fm').value+'&ground='+($('fg').checked?1:0)).then(()=>feedInfo());
 feedInfo(true);setInterval(feedInfo,2000);
 async function loop(){for(;;){try{const b=await(await fetch('/frame')).blob();const u=URL.createObjectURL(b);
 await new Promise(r=>{s.onload=s.onerror=r;s.src=u});URL.revokeObjectURL(u)}catch(e){await new Promise(r=>setTimeout(r,500))}
@@ -216,13 +216,15 @@ static int serve(int port) {
         if (!u.empty()) live.feed_url = u;
         if (!rf.empty()) { int v = atoi(rf.c_str()); live.refresh_s = v < 2 ? 2 : v > 300 ? 300 : v; }
         if (!g.empty()) live.include_ground = g == "1";
+        std::string mx = queryValue(path, "max");
+        if (!mx.empty()) { int v = atoi(mx.c_str()); radar.set.max_aircraft = (uint8_t)(v < 1 ? 1 : v > MAX_AIRCRAFT ? MAX_AIRCRAFT : v); }
         respond(fd, "text/plain", "ok", 2);
       }
       else if (path == "/feedinfo") {
         char j[700];
         long age = live.last_ok ? (long)time(nullptr) - live.last_ok : -1;
-        int n = snprintf(j, sizeof j, "{\"live\":%s,\"url\":\"%s\",\"refresh\":%d,\"ground\":%s,\"count\":%d,\"age\":%ld,\"errors\":%d,\"lookups\":%d,\"error\":\"%s\"}",
-                         live_mode ? "true" : "false", jsonEscape(live.feed_url).c_str(), live.refresh_s, live.include_ground ? "true" : "false",
+        int n = snprintf(j, sizeof j, "{\"live\":%s,\"url\":\"%s\",\"refresh\":%d,\"max\":%d,\"ground\":%s,\"count\":%d,\"age\":%ld,\"errors\":%d,\"lookups\":%d,\"error\":\"%s\"}",
+                         live_mode ? "true" : "false", jsonEscape(live.feed_url).c_str(), live.refresh_s, (int)radar.set.max_aircraft, live.include_ground ? "true" : "false",
                          live.last_count, age, live.errors, live.lookups, jsonEscape(live.last_error).c_str());
         respond(fd, "application/json", j, (size_t)(n < (int)sizeof j ? n : (int)sizeof j - 1));
       }

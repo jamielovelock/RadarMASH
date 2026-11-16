@@ -205,6 +205,12 @@ TEST(only_plain_callsigns_are_looked_up) {
   CHECK(!lookupableCallsign("POTTR"));               // no number: not an airline flight
 }
 
+TEST(aircraft_limit_defaults_to_ten) {
+  Settings s;
+  CHECK(s.max_aircraft == 10);
+  CHECK(s.max_aircraft <= MAX_AIRCRAFT);
+}
+
 TEST(feed_radius_covers_the_scope) {
   CHECK(feedRadiusNm(40) == 23);                     // 40 km is 21.6 nm, plus a little
   CHECK(feedRadiusNm(160) >= 87 && feedRadiusNm(160) <= 92);

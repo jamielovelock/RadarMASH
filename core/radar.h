@@ -55,6 +55,7 @@ struct Settings {
   bool map = true;            // map underlay, when one has been loaded
   MapStyle map_style = MapStyle::Dark;
   uint8_t map_brightness = 55;                // percent
+  uint8_t max_aircraft = 10;                  // show at most this many, nearest home first (up to MAX_AIRCRAFT)
 };
 
 constexpr int MAX_AIRCRAFT = 64;

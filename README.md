@@ -39,6 +39,7 @@ line; it is not stored in the project.
 - **Airline names and routes** come from [adsbdb](https://www.adsbdb.com), looked up a few callsigns at a time and
   remembered. Routes are what the airline usually flies under that flight number, so they are occasionally wrong.
 - Between updates each aircraft is carried on along its track, so it glides rather than jumps.
+- At most 10 aircraft are shown by default, the nearest first; the limit is settable.
 
 ## Map underlay
 
