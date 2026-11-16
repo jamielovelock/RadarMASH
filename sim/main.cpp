@@ -3,10 +3,12 @@
 //
 // Desktop simulator. Builds the same drawing code as the device and shows it in a web browser, with no dependencies
 // beyond a C++ compiler:
-//   radarmash-sim                       serve the live screen at http://localhost:8360
+//   radarmash-sim                       serve the screen at http://localhost:8360 with made-up demo traffic
+//   radarmash-sim --live --home LAT,LON real aircraft around that position, from the free feeds
 //   radarmash-sim --shot out.bmp [--t ms] [--select n] [--range km] [--map]     write one frame and exit
 // The map underlay downloads tiles with curl and keeps them in ~/.cache/radarmash. Still frames stay offline unless --map.
 #include "../core/radar.h"
+#include "live.h"
 #include "tiles.h"
 #include <arpa/inet.h>
 #include <chrono>
@@ -16,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <mutex>
 #include <string>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -25,6 +28,9 @@ using namespace rm;
 
 static uint16_t frame[SCREEN_W * SCREEN_H];
 static Radar radar;
+static std::mutex radar_mu;                // the live-data thread and the web requests both touch the radar
+static Live live;
+static bool live_mode = false;             // real aircraft instead of demo traffic
 
 static uint32_t nowMs() {
   static const auto t0 = std::chrono::steady_clock::now();
@@ -79,7 +85,7 @@ static std::string jsonEscape(const std::string &in) {
 }
 
 static void render(uint32_t t) {
-  demoTraffic(radar, t);
+  if (!live_mode) demoTraffic(radar, t);
   ensureMap();
   radar.tick(t);
   Canvas c(frame, 0, SCREEN_H);          // one band covering the whole screen
@@ -129,7 +135,7 @@ static const char PAGE[] = R"HTML(<!doctype html><meta charset=utf-8><title>Rada
 body{background:#16181c;color:#bbb;font:14px system-ui;text-align:center;margin:0;padding:24px}
 .case{display:inline-block;padding:14px;border-radius:50%;background:#050505;box-shadow:0 0 0 3px #2a2a2a}
 img{display:block;width:540px;height:540px;border-radius:50%;image-rendering:pixelated;background:#000}
-button{font:inherit;margin:14px 6px;padding:8px 16px} label{margin:0 8px;white-space:nowrap;display:inline-block;line-height:1.9} #t{margin:0 0 12px} #m{margin:0 0 12px} input,select{font:inherit;background:#22252b;color:#ddd;border:1px solid #444;padding:3px} small{display:block;opacity:.6}
+button{font:inherit;margin:14px 6px;padding:8px 16px} label{margin:0 8px;white-space:nowrap;display:inline-block;line-height:1.9} #t{margin:0 0 12px} #m,#f{margin:0 0 12px} input,select{font:inherit;background:#22252b;color:#ddd;border:1px solid #444;padding:3px} small{display:block;opacity:.6}
 </style>
 <div class=case><img id=s width=360 height=360 alt="radar screen"></div>
 <div><button id=sp>Short press</button><button id=lp>Long press</button><button id=px>Actual pixels</button></div>
@@ -138,7 +144,10 @@ button{font:inherit;margin:14px 6px;padding:8px 16px} label{margin:0 8px;white-s
  style <select id=ms><option value=0>As is<option value=1>Dark<option value=2>Green</select>
  brightness <input id=mb type=range min=0 max=100 style="vertical-align:middle;width:90px"> <button id=ma style="margin:4px">Apply</button>
  <span id=mi></span></div>
-<small>Short press: next aircraft. Long press: next range (zoom). Auto-cycle moves on every 5 s. Demo traffic runs 20x faster than life.</small>
+<div id=f>Aircraft feed <select id=fu><option value="https://opendata.adsb.fi/api/v3/lat/{lat}/lon/{lon}/dist/{nm}">adsb.fi<option value="https://api.adsb.lol/v2/point/{lat}/{lon}/{nm}">adsb.lol</select>
+ refresh every <input id=fr type=number min=2 max=300 style="width:4em"> s
+ <label><input id=fg type=checkbox> on the ground</label> <button id=fa style="margin:4px">Apply</button> <span id=fi></span></div>
+<small>Short press: next aircraft. Long press: next range (zoom). Auto-cycle moves on every 5 s. <span id=dm>Demo traffic runs 20x faster than life.</span></small>
 <script>
 const s=document.getElementById('s');let big=true;
 document.getElementById('sp').onclick=()=>fetch('/press');
@@ -151,6 +160,10 @@ function mapInfo(fill){fetch('/mapinfo').then(r=>r.json()).then(j=>{if(fill){$('
 $('mi').textContent='range '+j.range+' km, zoom '+j.zoom+(j.missing?', '+j.missing+' tiles missing':'')})}
 function mapApply(){fetch('/map?url='+encodeURIComponent($('mu').value)+'&credit='+encodeURIComponent($('mc').value)+'&style='+$('ms').value+'&bright='+$('mb').value).then(()=>setTimeout(mapInfo,1500))}
 $('ma').onclick=mapApply;$('ms').onchange=mapApply;$('mb').onchange=mapApply;mapInfo(true);setInterval(mapInfo,3000);
+function feedInfo(fill){fetch('/feedinfo').then(r=>r.json()).then(j=>{if(fill){$('fr').value=j.refresh;$('fg').checked=j.ground}
+$('fu').value=j.url;$('f').style.display=j.live?'':'none';$('dm').style.display=j.live?'none':'';$('fi').textContent=j.count<0?'waiting for the first reply':j.count+' aircraft, updated '+j.age+' s ago'+(j.error?' ('+j.error+')':'')})}
+$('fa').onclick=()=>fetch('/feed?url='+encodeURIComponent($('fu').value)+'&refresh='+$('fr').value+'&ground='+($('fg').checked?1:0)).then(()=>feedInfo());
+feedInfo(true);setInterval(feedInfo,2000);
 async function loop(){for(;;){try{const b=await(await fetch('/frame')).blob();const u=URL.createObjectURL(b);
 await new Promise(r=>{s.onload=s.onerror=r;s.src=u});URL.revokeObjectURL(u)}catch(e){await new Promise(r=>setTimeout(r,500))}
 await new Promise(r=>setTimeout(r,50))}}loop();
@@ -179,6 +192,7 @@ static int serve(int port) {
     char req[2048]; ssize_t n = recv(fd, req, sizeof req - 1, 0);
     if (n > 0) {
       req[n] = 0;
+      std::lock_guard<std::mutex> lock(radar_mu);
       std::string path = "/";
       if (char *sp = strchr(req, ' ')) { char *e = strchr(sp + 1, ' '); if (e) path.assign(sp + 1, e); }
       if (path == "/frame") { render(nowMs()); auto b = bmp(); respond(fd, "image/bmp", b.data(), b.size()); }
@@ -196,6 +210,21 @@ static int serve(int port) {
         if (!st.empty()) radar.set.map_style = (MapStyle)(atoi(st.c_str()) % (int)MapStyle::Count);
         if (!b.empty()) { int v = atoi(b.c_str()); radar.set.map_brightness = (uint8_t)(v < 0 ? 0 : v > 100 ? 100 : v); }
         respond(fd, "text/plain", "ok", 2);
+      }
+      else if (path.rfind("/feed?", 0) == 0) {              // feed source and refresh rate from the page
+        std::string u = queryValue(path, "url"), rf = queryValue(path, "refresh"), g = queryValue(path, "ground");
+        if (!u.empty()) live.feed_url = u;
+        if (!rf.empty()) { int v = atoi(rf.c_str()); live.refresh_s = v < 2 ? 2 : v > 300 ? 300 : v; }
+        if (!g.empty()) live.include_ground = g == "1";
+        respond(fd, "text/plain", "ok", 2);
+      }
+      else if (path == "/feedinfo") {
+        char j[700];
+        long age = live.last_ok ? (long)time(nullptr) - live.last_ok : -1;
+        int n = snprintf(j, sizeof j, "{\"live\":%s,\"url\":\"%s\",\"refresh\":%d,\"ground\":%s,\"count\":%d,\"age\":%ld,\"errors\":%d,\"lookups\":%d,\"error\":\"%s\"}",
+                         live_mode ? "true" : "false", jsonEscape(live.feed_url).c_str(), live.refresh_s, live.include_ground ? "true" : "false",
+                         live.last_count, age, live.errors, live.lookups, jsonEscape(live.last_error).c_str());
+        respond(fd, "application/json", j, (size_t)(n < (int)sizeof j ? n : (int)sizeof j - 1));
       }
       else if (path == "/mapinfo") {
         char j[700];
@@ -215,7 +244,8 @@ int main(int argc, char **argv) {
   const char *shot = nullptr; uint32_t t = 2600; int select = -1, port = 8360; float range = 0; bool want_map = false;
   tiles.url_template = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
   const char *ua = getenv("RADARMASH_UA");
-  tiles.user_agent = ua && *ua ? ua : "RadarMASH-simulator/0.1";
+  tiles.user_agent = live.user_agent = ua && *ua ? ua : "RadarMASH-simulator/0.1";
+  bool have_home = false;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--shot" && i + 1 < argc) shot = argv[++i];
@@ -224,12 +254,16 @@ int main(int argc, char **argv) {
     else if (a == "--range" && i + 1 < argc) range = (float)atof(argv[++i]);
     else if (a == "--port" && i + 1 < argc) port = atoi(argv[++i]);
     else if (a == "--map") want_map = true;
+    else if (a == "--live") live_mode = true;
+    else if (a == "--home" && i + 1 < argc) { have_home = sscanf(argv[++i], "%lf,%lf", &radar.home_lat, &radar.home_lon) == 2; }
     else if (a == "--no-map") want_map = false, shot = shot ? shot : nullptr, map_allowed = false, radar.set.map = false;
     else if (a == "--style" && i + 1 < argc) radar.set.map_style = (MapStyle)(atoi(argv[++i]) % (int)MapStyle::Count);
     else { fprintf(stderr, "usage: %s [--port n] | --shot out.bmp [--t ms] [--select n] [--range km] [--map] [--style 0-2]\n       --no-map with no --shot serves without a map\n", argv[0]); return 2; }
   }
   if (range > 0) radar.range_km = range;
   map_allowed = shot ? want_map : radar.set.map;        // a still frame stays offline unless asked for --map
+  if (live_mode && (!have_home || shot)) { fprintf(stderr, "--live needs --home lat,lon and cannot be used with --shot\n"); return 2; }
+  if (live_mode) live.start(&radar, &radar_mu, nowMs);
   if (!shot) return serve(port);
   demoTraffic(radar, t);
   radar.set.auto_cycle = false;          // a still frame shows exactly the aircraft asked for

@@ -16,6 +16,7 @@ enum class Shape : uint8_t { Unknown, Light, Narrow, Wide, Heli, Military };
 constexpr int TRAIL_POINTS = 16;
 
 struct Aircraft {
+  char hex[7] = "";            // ICAO 24-bit address: what identifies an aircraft from one update to the next
   char callsign[9] = "";
   char airline[26] = "";      // operator name, empty if unknown
   char type[5] = "";          // ICAO type, e.g. B77W
@@ -28,6 +29,11 @@ struct Aircraft {
   float speed_kt = 0;
   float trail_lat[TRAIL_POINTS], trail_lon[TRAIL_POINTS];   // past positions, newest first
   int trail_len = 0;
+  bool on_ground = false;
+  // Live aircraft only: the last reported position and when it arrived. The drawn position runs on from it between updates.
+  bool live = false;
+  double fix_lat = 0, fix_lon = 0;
+  uint32_t fix_ms = 0;
 };
 
 // Everything a user can switch on or off. The web settings page will read and write this.
@@ -51,7 +57,7 @@ struct Settings {
   uint8_t map_brightness = 55;                // percent
 };
 
-constexpr int MAX_AIRCRAFT = 32;
+constexpr int MAX_AIRCRAFT = 64;
 constexpr float RADAR_RADIUS = 172.0f;    // outer range ring, in pixels
 constexpr float RANGES_KM[] = {10, 20, 40, 80, 160};   // the zoom levels a long press steps through
 
@@ -67,7 +73,9 @@ struct Radar {
   float sweep_deg = 0;        // current sweep bearing
   uint32_t now_ms = 0, last_cycle_ms = 0;
 
-  void tick(uint32_t now_ms);                   // advance the sweep and the auto-cycle
+  void tick(uint32_t now_ms);                   // advance the sweep, the auto-cycle and live aircraft between updates
+  // Take a fresh list from the feed (it is modified). Trails, routes and the highlight carry over by hex address.
+  void update(Aircraft *fresh, int n, uint32_t now_ms);
   void shortPress();                            // highlight the next aircraft in view
   void longPress();                             // step to the next range (zoom level)
   void draw(Canvas &c) const;                   // draw this canvas's band of the screen

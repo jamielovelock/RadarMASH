@@ -11,7 +11,7 @@ simulator.
 | Folder | What it is |
 |---|---|
 | `core/` | Portable C++ drawing code and the radar screen. No hardware dependencies. |
-| `sim/` | Desktop simulator: runs `core/` on your computer and shows the screen in a web browser. |
+| `sim/` | Desktop simulator: runs `core/` on your computer and shows the screen in a web browser, with demo or live aircraft. |
 | `tests/` | Unit tests for `core/`. |
 
 The device firmware will be added as its own folder and will build the same `core/` code.
@@ -25,6 +25,20 @@ You need a C++17 compiler and `make` (macOS or Linux), plus `curl` if you want t
 Then open http://localhost:8360. "Short press" and "Long press" stand in for the device's single button.
 
 To save one frame instead: `sim/radarmash-sim --shot frame.bmp --t 9000 --select 0`
+
+## Live aircraft
+
+    make run ARGS="--live --home LAT,LON"
+
+shows real aircraft around that position instead of the demo traffic. Your position is only ever given on the command
+line; it is not stored in the project.
+
+- **Positions** come from [adsb.fi](https://adsb.fi) or [adsb.lol](https://adsb.lol), two free community services that
+  serve the same "readsb" format. If one stops answering, the simulator switches to the other. The refresh rate is
+  settable; please keep it gentle (the default is every 5 seconds, the minimum 2).
+- **Airline names and routes** come from [adsbdb](https://www.adsbdb.com), looked up a few callsigns at a time and
+  remembered. Routes are what the airline usually flies under that flight number, so they are occasionally wrong.
+- Between updates each aircraft is carried on along its track, so it glides rather than jumps.
 
 ## Map underlay
 

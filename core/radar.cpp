@@ -39,8 +39,54 @@ static int nextInView(const Radar &r, int from, bool wrap) {
   return -1;
 }
 
+void Radar::update(Aircraft *fresh, int n, uint32_t t) {
+  if (n > MAX_AIRCRAFT) n = MAX_AIRCRAFT;
+  char sel_hex[sizeof ac[0].hex] = "";
+  if (selected >= 0 && selected < count) memcpy(sel_hex, ac[selected].hex, sizeof sel_hex);
+  const double kx = 111.32 * cos(home_lat * 3.14159265358979 / 180.0);
+  for (int i = 0; i < n; i++) {
+    Aircraft &f = fresh[i];
+    f.live = true; f.fix_lat = f.lat; f.fix_lon = f.lon; f.fix_ms = t;
+    f.trail_len = 0;
+    const Aircraft *old = nullptr;
+    for (int k = 0; k < count && f.hex[0]; k++)
+      if (strcmp(ac[k].hex, f.hex) == 0) { old = &ac[k]; break; }
+    if (!old) continue;
+    if (!f.airline[0]) memcpy(f.airline, old->airline, sizeof f.airline);
+    if (!f.origin[0]) { memcpy(f.origin, old->origin, sizeof f.origin); memcpy(f.dest, old->dest, sizeof f.dest); }
+    // the previous report becomes the newest trail point, unless the aircraft has barely moved
+    double e = (f.lon - old->fix_lon) * kx, nn = (f.lat - old->fix_lat) * 110.57;
+    bool moved = old->live && e * e + nn * nn > 0.15 * 0.15;
+    int keep = old->trail_len;
+    if (moved) {
+      f.trail_lat[0] = (float)old->fix_lat; f.trail_lon[0] = (float)old->fix_lon;
+      if (keep > TRAIL_POINTS - 1) keep = TRAIL_POINTS - 1;
+    }
+    for (int k = 0; k < keep; k++) { f.trail_lat[k + (moved ? 1 : 0)] = old->trail_lat[k]; f.trail_lon[k + (moved ? 1 : 0)] = old->trail_lon[k]; }
+    f.trail_len = keep + (moved ? 1 : 0);
+  }
+  for (int i = 0; i < n; i++) ac[i] = fresh[i];
+  count = n;
+  selected = -1;
+  for (int i = 0; i < n && sel_hex[0]; i++)
+    if (strcmp(ac[i].hex, sel_hex) == 0) { selected = i; break; }
+}
+
 void Radar::tick(uint32_t t) {
   now_ms = t;
+  // Between updates, carry each live aircraft on along its track so it glides instead of jumping. Capped, so an
+  // aircraft whose reports stop does not sail away for ever.
+  const double kx = 111.32 * cos(home_lat * 3.14159265358979 / 180.0);
+  for (int i = 0; i < count; i++) {
+    Aircraft &a = ac[i];
+    if (!a.live) continue;
+    uint32_t age = t - a.fix_ms;
+    if (age > 30000) age = 30000;
+    double km = a.on_ground || a.speed_kt < 30 ? 0 : a.speed_kt * 1.852 * age / 3600000.0;
+    double tr = a.track_deg * PI_F / 180.0;
+    a.lat = a.fix_lat + cos(tr) * km / 110.57;
+    a.lon = a.fix_lon + sin(tr) * km / kx;
+  }
   sweep_deg = fmodf((float)t, SWEEP_PERIOD_MS) / SWEEP_PERIOD_MS * 360.0f;
   float x, y;
   bool gone = selected >= 0 && (selected >= count || !project(ac[selected], x, y));   // flew out of view
@@ -351,6 +397,8 @@ void demoTraffic(Radar &r, uint32_t now_ms) {
     demoAt(d, km, e, n, trk);
     a.lat = r.home_lat + n / 110.57; a.lon = r.home_lon + e / km_per_deg_lon;
     a.alt_ft = d.alt_ft; a.track_deg = trk; a.speed_kt = d.speed_kt;
+    a.live = false; a.on_ground = false;
+    snprintf(a.hex, sizeof a.hex, "d%05d", i);
     a.trail_len = 0;
     for (int k = 1; k <= TRAIL_POINTS; k++) {
       float back = km - k * trail_step_km;
