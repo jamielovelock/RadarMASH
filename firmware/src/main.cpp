@@ -18,6 +18,7 @@
 #include <WiFiClientSecure.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
+#include <esp_psram.h>
 #include <mbedtls/sha256.h>
 
 #include "feed.h"
@@ -48,6 +49,9 @@ static uint32_t last_activity_ms = 0, wifi_lost_ms = 0;
 static uint32_t frame_ms = 0, frames = 0;
 static int brightness = 1023;
 static char boot_note[40] = "";
+
+// True only if the external memory chip really answered and is usable as heap (the Arduino flag alone is not proof).
+static bool psramOk() { return esp_psram_is_initialized() && heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0; }
 
 // ---- panel ----
 static uint16_t band[SCREEN_W * BAND_ROWS];        // one strip of the picture, upright
@@ -299,6 +303,8 @@ static void hStatus() {
   j += ",\"refresh_s\":" + String(refresh_s) + ",\"max_aircraft\":" + String((int)radar.set.max_aircraft) + ",\"range_km\":" + String((int)radar.range_km);
   j += ",\"selected\":" + String(radar.selected);
   j += ",\"reset_reason\":" + String((int)esp_reset_reason()) + ",\"uptime_ms\":" + String(millis());
+  j += ",\"psram\":" + String(psramOk() ? "true" : "false") + ",\"psram_size\":" + String((unsigned)esp_psram_get_size());
+  j += ",\"psram_heap\":" + String((unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM)) + ",\"psram_free\":" + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   j += ",\"heap\":" + String(ESP.getFreeHeap()) + ",\"heap_min\":" + String(ESP.getMinFreeHeap()) + ",\"rssi\":" + String(WiFi.RSSI()) + "}";
   server.send(200, "application/json", j);
 }
@@ -338,6 +344,23 @@ static void hFeed() {
   if (server.hasArg("refresh")) refresh_s = constrain((int)server.arg("refresh").toInt(), 2, 300);
   if (server.hasArg("max")) radar.set.max_aircraft = (uint8_t)constrain((int)server.arg("max").toInt(), 1, MAX_AIRCRAFT);
   ok();
+}
+// Exercise the external memory chip: write a pattern across a block, read it back, and time both.
+static void hPsramTest() {
+  touch();
+  if (!psramOk()) { server.send(200, "application/json", "{\"found\":false}"); return; }
+  size_t bytes = (size_t)constrain((int)server.arg("mb").toInt(), 1, 6) * 1024 * 1024;
+  uint32_t *p = (uint32_t *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+  if (!p) { server.send(200, "application/json", "{\"found\":true,\"alloc\":false}"); return; }
+  size_t n = bytes / 4, bad = 0;
+  uint32_t t0 = millis();
+  for (size_t i = 0; i < n; i++) p[i] = (uint32_t)(i * 2654435761UL) ^ 0xA5A5A5A5UL;
+  uint32_t t1 = millis();
+  for (size_t i = 0; i < n; i++) bad += p[i] != ((uint32_t)(i * 2654435761UL) ^ 0xA5A5A5A5UL);
+  uint32_t t2 = millis();
+  heap_caps_free(p);
+  server.send(200, "application/json", String("{\"found\":true,\"alloc\":true,\"bytes\":") + String(bytes) + ",\"bad_words\":" + String(bad) +
+                                         ",\"write_ms\":" + String(t1 - t0) + ",\"read_ms\":" + String(t2 - t1) + "}");
 }
 static void hStay() { touch(); bool c = confirmSelf(); server.send(c ? 200 : 500, "text/plain", c ? "confirmed: this image now survives resets" : "confirm failed"); }
 static void hStock() {
@@ -403,6 +426,7 @@ void setup() {
   server.on("/home", hHome);
   server.on("/demo", hDemo);
   server.on("/feed", hFeed);
+  server.on("/psramtest", hPsramTest);
   server.on("/stay", hStay);
   server.on("/stock", hStock);
   server.on("/reboot", hReboot);
