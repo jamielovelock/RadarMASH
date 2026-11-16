@@ -4,8 +4,8 @@ Open firmware for the GeekMagic Radar 360 (model `radar21en`): a 2.1" round, 360
 around you. Named in honour of Radar O'Reilly, who always heard the choppers first.
 
 **Status: early development.** The simulator is the easy way to try it. The device firmware is a development build that
-boots and shows live aircraft, but it has no map, no saved settings and no Wi-Fi setup screen yet, and is not ready for
-general use.
+boots and shows live aircraft over the map, but it has no saved settings and no Wi-Fi setup screen yet, and is not
+ready for general use.
 
 ## Layout
 
@@ -86,7 +86,7 @@ picture as drawing it whole.
 
 ## Licence
 
-GPL-3.0-or-later; see `LICENSE`. Two bundled files keep their own licences, reproduced inside them: `core/font5x7.h`
+GPL-3.0-or-later; see `LICENSE`. The firmware links the PNGdec library (Apache-2.0), fetched at build time. Two bundled files keep their own licences, reproduced inside them: `core/font5x7.h`
 (Adafruit GFX Library, BSD) and `sim/third_party/stb_image.h` (stb, public domain / MIT; simulator only).
 
 RadarMASH is an independent hobby project. It is not affiliated with GeekMagic, and contains none of their code.

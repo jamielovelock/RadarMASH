@@ -9,9 +9,11 @@
 //  - Unconfirmed and left alone for 30 minutes, it restarts (back to the other slot).
 //  - /ota writes only the other slot. Before erasing it, this image confirms itself: by then it has joined Wi-Fi and is
 //    receiving the upload, and a half-written slot must never be the only thing left. /ota/dry receives without writing.
-//  - No map yet: that needs the PSRAM, which has not been verified with this build.
+//  - The map and the fast drawing path live in the external memory (PSRAM). If that is ever missing the radar still runs,
+//    more slowly and without a map.
 #include <Arduino.h>
 #include <HTTPClient.h>
+#include <PNGdec.h>
 #include <SPI.h>
 #include <WebServer.h>
 #include <WiFi.h>
@@ -218,9 +220,112 @@ static void lookupOneRoute() {
   }
 }
 
+// ---- map underlay (needs PSRAM) ----
+// Tiles are fetched over HTTPS as PNG, decoded one at a time, and composed into a picture the radar draws over. Raw
+// tiles are kept in memory while the device is up, so changing range and coming back does not download them again.
+static String map_url = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+static char map_credit[28] = "(c) OpenStreetMap";
+static MapImage *map_front = nullptr, *map_back = nullptr;   // front is on screen; back is being built
+static uint16_t *tile_px = nullptr;                          // one decoded tile
+static PNG *png = nullptr;
+static int map_tiles_fetched = 0, map_tiles_failed = 0, map_decode_failed = 0, map_missing = -1;
+static uint32_t map_built_ms = 0;
+static String map_built_for;
+
+struct RawTile { int z, x, y; uint8_t *data; int len; };
+static RawTile raw_tiles[40];
+static int raw_next = 0;
+
+static int pngLine(PNGDRAW *d) {
+  if (d->y >= 0 && d->y < TILE_SIZE) png->getLineAsRGB565(d, tile_px + d->y * TILE_SIZE, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
+  return 1;
+}
+
+static bool fetchBytes(const String &url, uint8_t *&data, int &len) {
+  WiFiClientSecure client;
+  client.setInsecure();                             // development build: certificates are not checked yet
+  HTTPClient http;
+  http.setUserAgent(USER_AGENT);
+  http.setConnectTimeout(8000); http.setTimeout(8000);
+  if (!http.begin(client, url)) return false;
+  bool ok = false;
+  if (http.GET() == 200) {
+    len = http.getSize();
+    if (len > 0 && len <= 300000 && (data = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM)) != nullptr) {
+      // Read until it is all here. A tile arrives in bursts, so a single read with the stream's short timeout gives up early.
+      Stream &in = http.getStream();
+      int got = 0;
+      uint32_t deadline = millis() + 15000;
+      while (got < len && millis() < deadline) {
+        int avail = in.available();
+        if (avail > 0) got += (int)in.readBytes(data + got, min(avail, len - got));
+        else if (!http.connected()) break;
+        else delay(2);
+      }
+      ok = got == len;
+      if (!ok) { heap_caps_free(data); data = nullptr; }
+    }
+  }
+  http.end();
+  return ok;
+}
+
+struct DeviceTiles : TileSource {
+  const uint16_t *tile(int z, int x, int y) override {
+    RawTile *t = nullptr;
+    for (RawTile &r : raw_tiles) if (r.data && r.z == z && r.x == x && r.y == y) { t = &r; break; }
+    if (!t) {
+      String url = map_url;
+      url.replace("{z}", String(z)); url.replace("{x}", String(x)); url.replace("{y}", String(y)); url.replace("{s}", "a");
+      uint8_t *data = nullptr; int len = 0;
+      if (!fetchBytes(url, data, len)) { map_tiles_failed++; return nullptr; }
+      map_tiles_fetched++;
+      t = &raw_tiles[raw_next]; raw_next = (raw_next + 1) % (int)(sizeof raw_tiles / sizeof raw_tiles[0]);
+      if (t->data) heap_caps_free(t->data);
+      *t = RawTile{z, x, y, data, len};
+    }
+    bool ok = png->openRAM(t->data, t->len, pngLine) == PNG_SUCCESS;
+    if (ok) {
+      ok = png->getWidth() == TILE_SIZE && png->getHeight() == TILE_SIZE && png->decode(nullptr, 0) == PNG_SUCCESS;
+      png->close();
+    }
+    if (!ok) { map_decode_failed++; heap_caps_free(t->data); t->data = nullptr; }   // do not keep a tile we cannot read
+    return ok ? tile_px : nullptr;
+  }
+};
+static DeviceTiles device_tiles;
+
+static bool mapSetup() {
+  if (map_front) return true;
+  if (!psramOk()) return false;
+  void *a = heap_caps_malloc(sizeof(MapImage), MALLOC_CAP_SPIRAM), *b = heap_caps_malloc(sizeof(MapImage), MALLOC_CAP_SPIRAM);
+  void *p = heap_caps_malloc(sizeof(PNG), MALLOC_CAP_SPIRAM);
+  tile_px = (uint16_t *)heap_caps_malloc(TILE_SIZE * TILE_SIZE * 2, MALLOC_CAP_SPIRAM);
+  if (!a || !b || !p || !tile_px) return false;
+  map_front = new (a) MapImage(); map_back = new (b) MapImage(); png = new (p) PNG();
+  return true;
+}
+
+// Rebuild the map when home, range, style or source changes, and retry now and then while tiles are missing.
+static void updateMap() {
+  double lat, lon; float range; MapStyle style; bool want;
+  { Lock lock; lat = radar.home_lat; lon = radar.home_lon; range = radar.range_km; style = radar.set.map_style; want = radar.set.map; }
+  if (!want || !mapSetup()) return;
+  String key = String(lat, 4) + "," + String(lon, 4) + "," + String(range, 0) + "," + String((int)style) + "," + map_url;
+  if (key == map_built_for && (map_missing == 0 || millis() - map_built_ms < 60000)) return;   // be gentle on the tile server
+  int missing = composeMap(*map_back, device_tiles, lat, lon, range, style);
+  Lock lock;
+  MapImage *t = map_front; map_front = map_back; map_back = t;
+  map_back->version = map_front->version;           // keep the two counters in step so every rebuild looks new
+  radar.map = map_front;
+  snprintf(radar.map_credit, sizeof radar.map_credit, "%s", map_credit);
+  map_missing = missing; map_built_ms = millis(); map_built_for = key;
+}
+
 static void feedTask(void *) {
   for (;;) {
     uint32_t began = millis();
+    if (WiFi.status() == WL_CONNECTED) updateMap();
     if (live_mode && WiFi.status() == WL_CONNECTED) { pollFeed(); lookupOneRoute(); }
     uint32_t every = (uint32_t)constrain(refresh_s, 2, 300) * 1000UL, took = millis() - began;
     vTaskDelay(pdMS_TO_TICKS(took < every ? every - took : 200));
@@ -304,6 +409,8 @@ static void hStatus() {
   j += ",\"refresh_s\":" + String(refresh_s) + ",\"max_aircraft\":" + String((int)radar.set.max_aircraft) + ",\"range_km\":" + String((int)radar.range_km);
   j += ",\"selected\":" + String(radar.selected);
   j += ",\"reset_reason\":" + String((int)esp_reset_reason()) + ",\"uptime_ms\":" + String(millis());
+  j += ",\"map\":" + String(radar.map ? "true" : "false") + ",\"map_zoom\":" + String(map_front ? map_front->zoom : -1) + ",\"map_missing\":" + String(map_missing);
+  j += ",\"map_tiles\":" + String(map_tiles_fetched) + ",\"map_tile_failures\":" + String(map_tiles_failed) + ",\"map_decode_failures\":" + String(map_decode_failed) + ",\"map_style\":" + String((int)radar.set.map_style) + ",\"map_brightness\":" + String((int)radar.set.map_brightness);
   j += ",\"cache\":" + String(radar.cache ? "true" : "false");
   j += ",\"psram\":" + String(psramOk() ? "true" : "false") + ",\"psram_size\":" + String((unsigned)esp_psram_get_size());
   j += ",\"psram_heap\":" + String((unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM)) + ",\"psram_free\":" + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -364,6 +471,16 @@ static void hPsramTest() {
   server.send(200, "application/json", String("{\"found\":true,\"alloc\":true,\"bytes\":") + String(bytes) + ",\"bad_words\":" + String(bad) +
                                          ",\"write_ms\":" + String(t1 - t0) + ",\"read_ms\":" + String(t2 - t1) + "}");
 }
+// Map source, credit line, style (0 as is, 1 dark, 2 green) and brightness. Held in memory only for now.
+static void hMap() {
+  touch(); Lock lock;
+  if (server.hasArg("url") && (server.arg("url").startsWith("https://") || server.arg("url").startsWith("http://"))) map_url = server.arg("url");
+  if (server.hasArg("credit")) snprintf(map_credit, sizeof map_credit, "%s", server.arg("credit").c_str());
+  if (server.hasArg("style")) radar.set.map_style = (MapStyle)constrain((int)server.arg("style").toInt(), 0, (int)MapStyle::Count - 1);
+  if (server.hasArg("bright")) radar.set.map_brightness = (uint8_t)constrain((int)server.arg("bright").toInt(), 0, 100);
+  snprintf(radar.map_credit, sizeof radar.map_credit, "%s", map_credit);
+  ok();
+}
 static void hStay() { touch(); bool c = confirmSelf(); server.send(c ? 200 : 500, "text/plain", c ? "confirmed: this image now survives resets" : "confirm failed"); }
 static void hStock() {
   touch();
@@ -380,11 +497,13 @@ static const char UI[] PROGMEM = R"HTML(<!doctype html><meta charset=utf-8><meta
 <p id=t></p>
 <p>Live aircraft: lat <input id=la size=8> lon <input id=lo size=8> <button onclick="g('/home?lat='+la.value+'&lon='+lo.value)">Go live</button><button onclick="g('/demo')">Demo</button><br>
  refresh <input id=rf size=3> s, show at most <input id=mx size=3> <button onclick="g('/feed?refresh='+rf.value+'&max='+mx.value)">Apply</button></p>
+<p>Map: style <select id=ms onchange="g('/map?style='+this.value)"><option value=0>As is<option value=1>Dark<option value=2>Green</select>
+ brightness <input id=mb type=range min=0 max=100 onchange="g('/map?bright='+this.value)" style="vertical-align:middle"></p>
 <p>Boot: <button onclick="g('/stock')">next boot = other firmware</button><button onclick="g('/reboot')">reboot</button></p>
 <pre id=s></pre>
 <script>const $=i=>document.getElementById(i);let filled=0;
 function g(u){fetch(u).then(()=>setTimeout(s,300))}
-function s(){fetch('/status').then(r=>r.json()).then(j=>{$('s').textContent=JSON.stringify(j,null,1);$('v').textContent=j.version;if(!filled){filled=1;$('rf').value=j.refresh_s;$('mx').value=j.max_aircraft}})}
+function s(){fetch('/status').then(r=>r.json()).then(j=>{$('s').textContent=JSON.stringify(j,null,1);$('v').textContent=j.version;if(!filled){filled=1;$('rf').value=j.refresh_s;$('mx').value=j.max_aircraft;$('ms').value=j.map_style;$('mb').value=j.map_brightness}})}
 fetch('/settings').then(r=>r.json()).then(a=>{for(const o of a){const l=document.createElement('label'),c=document.createElement('input');c.type='checkbox';c.checked=o.on;
 c.onchange=()=>fetch('/toggle?name='+o.name+'&on='+(c.checked?1:0));l.append(c,' '+o.label);$('t').append(l)}});
 s();setInterval(s,3000)</script>)HTML";
@@ -432,6 +551,7 @@ void setup() {
   server.on("/home", hHome);
   server.on("/demo", hDemo);
   server.on("/feed", hFeed);
+  server.on("/map", hMap);
   server.on("/psramtest", hPsramTest);
   server.on("/stay", hStay);
   server.on("/stock", hStock);
