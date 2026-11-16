@@ -31,6 +31,7 @@ static Radar radar;
 static std::mutex radar_mu;                // the live-data thread and the web requests both touch the radar
 static Live live;
 static bool live_mode = false;             // real aircraft instead of demo traffic
+static ScopeCache scope_cache;             // the same speed-up the device uses, so the simulator shows the same picture
 
 static uint32_t nowMs() {
   static const auto t0 = std::chrono::steady_clock::now();
@@ -88,6 +89,8 @@ static void render(uint32_t t) {
   if (!live_mode) demoTraffic(radar, t);
   ensureMap();
   radar.tick(t);
+  radar.cache = &scope_cache;
+  radar.prepare();
   Canvas c(frame, 0, SCREEN_H);          // one band covering the whole screen
   radar.draw(c);
 }

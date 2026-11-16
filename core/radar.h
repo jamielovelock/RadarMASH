@@ -64,6 +64,16 @@ extern const Toggle TOGGLES[];
 extern const int TOGGLE_COUNT;
 bool *toggleByName(Settings &s, const char *name);      // nullptr if there is no such switch
 
+// Optional speed-up, costing about 520 KB of memory. The parts of the scope that do not move (rings, axes, map) and the
+// bearing of every pixel are worked out once and kept, so each frame only has to add the sweep. Without it every frame
+// redoes the lot, which is correct but several times slower on the device.
+struct ScopeCache {
+  uint16_t bg[SCREEN_W * SCREEN_H];        // the still background, ready to copy
+  uint16_t bearing[SCREEN_W * SCREEN_H];   // 0..65535 for 0..360 degrees clockwise from up
+  uint32_t key = 0;                        // what bg was drawn for
+  bool valid = false, bearings_done = false;
+};
+
 constexpr int MAX_AIRCRAFT = 64;
 constexpr float RADAR_RADIUS = 172.0f;    // outer range ring, in pixels
 constexpr float RANGES_KM[] = {10, 20, 40, 80, 160};   // the zoom levels a long press steps through
@@ -76,6 +86,7 @@ struct Radar {
   int count = 0;
   int selected = -1;          // index into ac, or -1
   const MapImage *map = nullptr;                // underlay to draw, owned by the caller
+  ScopeCache *cache = nullptr;                  // optional, owned by the caller; see ScopeCache
   char map_credit[28] = "";                     // attribution the map source asks for, shown at the bottom
   float sweep_deg = 0;        // current sweep bearing
   uint32_t now_ms = 0, last_cycle_ms = 0;
@@ -85,6 +96,7 @@ struct Radar {
   void update(Aircraft *fresh, int n, uint32_t now_ms);
   void shortPress();                            // highlight the next aircraft in view
   void longPress();                             // step to the next range (zoom level)
+  void prepare();                               // once per frame before draw(): brings the cache up to date, if there is one
   void draw(Canvas &c) const;                   // draw this canvas's band of the screen
 
   void toScreen(double lat, double lon, float &x, float &y) const;

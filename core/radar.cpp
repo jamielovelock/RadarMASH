@@ -191,6 +191,78 @@ static void drawScope(Canvas &c, const Settings &set, float sweep_deg, const Map
   }
 }
 
+// ---- cached scope ----
+static uint32_t scopeKey(const Radar &r, const MapImage *underlay) {
+  uint32_t k = 0x9E3779B9u;
+  k = k * 31 + (r.set.rings ? 1 : 2);
+  k = k * 31 + (underlay ? 1000 + r.set.map_brightness : 7);
+  k = k * 31 + (underlay ? underlay->version : 0);
+  k = k * 31 + (uint32_t)(uintptr_t)underlay;
+  return k ? k : 1;
+}
+
+void Radar::prepare() {
+  if (!cache) return;
+  if (!cache->bearings_done) {
+    for (int y = 0; y < SCREEN_H; y++)
+      for (int x = 0; x < SCREEN_W; x++) {
+        float b = fastAtan2(x - CENTRE, -(y - CENTRE)) * (32768.0f / PI_F);       // -32768..32768
+        cache->bearing[y * SCREEN_W + x] = (uint16_t)(int)(b < 0 ? b + 65536.0f : b);
+      }
+    cache->bearings_done = true;
+  }
+  const MapImage *underlay = set.map && map && map->ready ? map : nullptr;
+  uint32_t k = scopeKey(*this, underlay);
+  if (cache->valid && cache->key == k) return;
+  Settings still = set;
+  still.sweep = false;
+  Canvas whole(cache->bg, 0, SCREEN_H);
+  drawScope(whole, still, 0, underlay);
+  cache->key = k; cache->valid = true;
+}
+
+// Brightness the sweep trail adds, by how far behind the sweep a pixel is: 1024 steps round the circle.
+static const uint8_t *trailTable() {
+  static uint8_t table[1024];
+  static bool done = false;
+  if (!done) {
+    for (int i = 0; i < 1024; i++) {
+      float behind = i * 360.0f / 1024.0f;
+      float t = behind < TRAIL_DEG ? 1.0f - behind / TRAIL_DEG : 0.0f;
+      table[i] = (uint8_t)(t * t * 120.0f);
+    }
+    done = true;
+  }
+  return table;
+}
+
+// The fast way to draw the background: copy the kept picture and add the sweep trail with whole-number sums only.
+static void drawScopeCached(Canvas &c, const ScopeCache &cache, bool sweep, float sweep_deg) {
+  const uint8_t *trail = trailTable();
+  const uint16_t sweep16 = (uint16_t)(int)(sweep_deg * (65536.0f / 360.0f));
+  const float outer2 = (RADAR_RADIUS + 1.0f) * (RADAR_RADIUS + 1.0f);
+  for (int y = c.y0; y < c.y0 + c.rows; y++) {
+    uint16_t *row = c.row(y);
+    memcpy(row, cache.bg + y * SCREEN_W, SCREEN_W * sizeof(uint16_t));
+    if (!sweep) continue;
+    float dy = y - CENTRE, half2 = outer2 - dy * dy;
+    if (half2 <= 0) continue;
+    int half = (int)sqrtf(half2);                                  // only the part of this row inside the glass
+    int x0 = (int)CENTRE - half, x1 = (int)CENTRE + 1 + half;
+    if (x0 < 0) x0 = 0;
+    if (x1 > SCREEN_W - 1) x1 = SCREEN_W - 1;
+    const uint16_t *bearing = cache.bearing + y * SCREEN_W;
+    for (int x = x0; x <= x1; x++) {
+      uint16_t p = row[x];
+      if (!p) continue;                                            // outside the glass (inside is never pure black)
+      int v = trail[(uint16_t)(sweep16 - bearing[x]) >> 6];
+      if (!v) continue;
+      int r = (p >> 11) + v / 80, g = ((p >> 5) & 63) + v / 4, b = (p & 31) + v * 9 / 160;   // the scope's green tint
+      row[x] = (uint16_t)(((r > 31 ? 31 : r) << 11) | ((g > 63 ? 63 : g) << 5) | (b > 31 ? 31 : b));
+    }
+  }
+}
+
 // ---- silhouettes ----
 // Each is a list of triangles in a unit square: nose at (0,-1), x to the right, y towards the tail.
 struct Tri { float ax, ay, bx, by, cx, cy; };
@@ -345,7 +417,8 @@ static void drawCard(Canvas &c, const Aircraft &a, bool at_top) {
 
 void Radar::draw(Canvas &c) const {
   const MapImage *underlay = set.map && map && map->ready ? map : nullptr;
-  drawScope(c, set, sweep_deg, underlay);
+  if (cache && cache->valid && cache->key == scopeKey(*this, underlay)) drawScopeCached(c, *cache, set.sweep, sweep_deg);
+  else drawScope(c, set, sweep_deg, underlay);
   if (underlay && map_credit[0]) c.textCentred(180, 337, map_credit, 1, rgb(150, 150, 150));
 
   if (set.sweep) {

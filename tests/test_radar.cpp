@@ -3,6 +3,7 @@
 #include "../core/radar.h"
 #include "test.h"
 #include <math.h>
+#include <stdlib.h>
 #include <memory>
 #include <stdio.h>
 #include <string.h>
@@ -291,6 +292,63 @@ TEST(every_switch_changes_the_picture) {
     r->set.*sw = !(r->set.*sw);
   }
   CHECK(renderWhole(*r) == base);
+}
+
+TEST(cached_scope_matches_the_slow_way) {
+  // The cache is a speed-up, not a different picture: every pixel must be within a shade of the uncached result.
+  auto r = blankRadar();
+  std::unique_ptr<ScopeCache> cache(new ScopeCache());
+  const uint32_t times[] = {0, 900, 2600, 3999};
+  for (uint32_t t : times)
+    for (int rings = 0; rings < 2; rings++) {
+      r->set.rings = rings == 1;
+      demoTraffic(*r, t); r->tick(t);
+      r->cache = nullptr;
+      Pixels slow = renderWhole(*r);
+      r->cache = cache.get();
+      r->prepare();
+      Pixels fast = renderWhole(*r);
+      int worst = 0;
+      for (size_t i = 0; i < slow.size(); i++) {
+        int dr = abs((slow[i] >> 11) - (fast[i] >> 11)), dg = abs(((slow[i] >> 5) & 63) - ((fast[i] >> 5) & 63)), db = abs((slow[i] & 31) - (fast[i] & 31));
+        int x = (int)(i % SCREEN_W), y = (int)(i / SCREEN_W);
+        if (hypot(x - CENTRE, y - CENTRE) < 6) continue;
+        double bearing = fmod(atan2(x - CENTRE, -(y - CENTRE)) * 180 / 3.14159265358979 + 360, 360);
+        double off = fabs(bearing - r->sweep_deg); if (off > 180) off = 360 - off;
+        if (off < 1.5) continue;                          // the bright leading edge lands within a degree either way
+        int d = dr > db ? dr : db; d = d > (dg + 1) / 2 ? d : (dg + 1) / 2;
+        if (d > worst) worst = d;
+      }
+      CHECK(worst <= 3);
+      CHECK(fast == renderInBands(*r, 40));             // and strips still match whole
+      CHECK(fast == renderInBands(*r, 7));
+    }
+}
+
+TEST(cache_is_rebuilt_when_the_background_changes) {
+  auto r = blankRadar();
+  std::unique_ptr<ScopeCache> cache(new ScopeCache());
+  r->cache = cache.get();
+  demoTraffic(*r, 3000); r->tick(3000);
+  r->prepare();
+  CHECK(cache->valid);
+  Pixels with_rings = renderWhole(*r);
+  r->set.rings = false;                               // changed, but prepare() not yet called: must not show a stale background
+  Pixels stale_guard = renderWhole(*r);
+  r->cache = nullptr;
+  CHECK(stale_guard == renderWhole(*r));              // it fell back to the slow way
+  r->cache = cache.get();
+  uint32_t before = cache->key;
+  r->prepare();
+  CHECK(cache->key != before);
+  CHECK(renderWhole(*r) != with_rings);
+  r->prepare();                                       // nothing changed: key stays
+  uint32_t same = cache->key;
+  r->set.sweep = false; r->set.labels = false;        // things that are not part of the background do not rebuild it
+  r->prepare();
+  CHECK(cache->key == same);
+  auto none = blankRadar();
+  none->prepare();                                    // no cache at all: harmless
 }
 
 TEST(switches_can_be_found_by_name) {

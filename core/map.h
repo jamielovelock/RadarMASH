@@ -39,6 +39,7 @@ struct MapImage {
   bool ready = false;       // holds a picture worth drawing
   int zoom = 0;
   int missing = 0;          // tiles the source could not supply last time
+  uint32_t version = 0;     // goes up each time the picture is rebuilt
 };
 
 // Fill `out` for this home and range. Returns the number of tiles that were missing (their area is left black).

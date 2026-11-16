@@ -101,6 +101,7 @@ static void drawFrame(bool demo) {
   Lock lock;
   if (demo) demoTraffic(radar, t0);
   radar.tick(t0);
+  radar.prepare();
   SPI.beginTransaction(SPISettings(SPI_HZ, MSBFIRST, SPI_MODE0));
   for (int y0 = 0; y0 < SCREEN_H; y0 += BAND_ROWS) {
     Canvas c(band, y0, BAND_ROWS);
@@ -303,6 +304,7 @@ static void hStatus() {
   j += ",\"refresh_s\":" + String(refresh_s) + ",\"max_aircraft\":" + String((int)radar.set.max_aircraft) + ",\"range_km\":" + String((int)radar.range_km);
   j += ",\"selected\":" + String(radar.selected);
   j += ",\"reset_reason\":" + String((int)esp_reset_reason()) + ",\"uptime_ms\":" + String(millis());
+  j += ",\"cache\":" + String(radar.cache ? "true" : "false");
   j += ",\"psram\":" + String(psramOk() ? "true" : "false") + ",\"psram_size\":" + String((unsigned)esp_psram_get_size());
   j += ",\"psram_heap\":" + String((unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM)) + ",\"psram_free\":" + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   j += ",\"heap\":" + String(ESP.getFreeHeap()) + ",\"heap_min\":" + String(ESP.getMinFreeHeap()) + ",\"rssi\":" + String(WiFi.RSSI()) + "}";
@@ -395,6 +397,10 @@ void setup() {
   if (!confirmed() && otherHasApp()) arm_err = esp_ota_set_boot_partition(other_p);   // any reset from here goes back to the other slot
 
   radar_mu = xSemaphoreCreateMutex();
+  if (psramOk()) {                                             // with the external memory, keep the still background ready
+    void *mem = heap_caps_malloc(sizeof(ScopeCache), MALLOC_CAP_SPIRAM);
+    if (mem) radar.cache = new (mem) ScopeCache();
+  }
   pinMode(PIN_BUZZ, OUTPUT); digitalWrite(PIN_BUZZ, LOW);                              // keep the buzzer quiet, as stock does
   pinMode(PIN_BTN, INPUT_PULLUP);
 

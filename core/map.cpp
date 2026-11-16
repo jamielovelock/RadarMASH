@@ -74,6 +74,7 @@ int composeMap(MapImage &out, TileSource &src, double home_lat, double home_lon,
       }
     }
   out.missing = missing;
+  out.version++;
   out.ready = true;
   return missing;
 }
