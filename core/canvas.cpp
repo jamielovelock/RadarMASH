@@ -15,6 +15,11 @@ static inline Color mix(Color d, Color c, int a) {
   return (Color)((r << 11) | (g << 5) | b);
 }
 
+// Float to int, limited to [lo, hi]. Anything not a number becomes lo. Keeps wild coordinates (bad data) from
+// overflowing an int or turning a short loop into billions of iterations.
+static inline int clampInt(float v, int lo, int hi) { return !(v > lo) ? lo : v > hi ? hi : (int)v; }
+static inline bool finite4(float a, float b, float c, float d) { return isfinite(a) && isfinite(b) && isfinite(c) && isfinite(d); }
+
 void Canvas::pixel(int x, int y, Color c) {
   if (x < 0 || x >= SCREEN_W || !hasRow(y)) return;
   row(y)[x] = c;
@@ -33,8 +38,9 @@ void Canvas::fill(Color c) {
 void Canvas::rect(int x, int y, int w, int h, Color c) { blendRect(x, y, w, h, c, 255); }
 
 void Canvas::blendRect(int x, int y, int w, int h, Color c, int alpha) {
-  int x1 = x < 0 ? 0 : x, x2 = x + w > SCREEN_W ? SCREEN_W : x + w;
-  int y1 = y < y0 ? y0 : y, y2 = y + h > y0 + rows ? y0 + rows : y + h;
+  long long xe = (long long)x + w, ye = (long long)y + h;        // 64-bit: x + w may not fit in an int
+  int x1 = x < 0 ? 0 : x, x2 = xe > SCREEN_W ? SCREEN_W : (int)xe;
+  int y1 = y < y0 ? y0 : y, y2 = ye > y0 + rows ? y0 + rows : (int)ye;
   for (int yy = y1; yy < y2; yy++) {
     uint16_t *r = row(yy);
     if (alpha >= 255) for (int xx = x1; xx < x2; xx++) r[xx] = c;
@@ -44,15 +50,20 @@ void Canvas::blendRect(int x, int y, int w, int h, Color c, int alpha) {
 
 // Xiaolin Wu style: walk the major axis and split coverage between the two nearest pixels on the minor axis.
 void Canvas::line(float xa, float ya, float xb, float yb, Color c, int alpha) {
+  if (!finite4(xa, ya, xb, yb)) return;
   float lo = ya < yb ? ya : yb, hi = ya < yb ? yb : ya;
-  if (hi < y0 - 1 || lo > y0 + rows) return;                   // wholly outside this band
+  // Wholly outside this band. The margin covers the half pixel the ends are rounded out by, plus the second row
+  // each step blends into.
+  if (hi < y0 - 2 || lo > y0 + rows + 1) return;
   bool steep = fabsf(yb - ya) > fabsf(xb - xa);
   if (steep) { float t = xa; xa = ya; ya = t; t = xb; xb = yb; yb = t; }
   if (xa > xb) { float t = xa; xa = xb; xb = t; t = ya; ya = yb; yb = t; }
   float dx = xb - xa, grad = dx < 1e-6f ? 0 : (yb - ya) / dx;
-  int xs = (int)floorf(xa + 0.5f), xe = (int)floorf(xb + 0.5f);
+  // only the part of the major axis that can be on screen (both axes are 360 long)
+  int xs = clampInt(floorf(xa + 0.5f), -1, SCREEN_W), xe = clampInt(floorf(xb + 0.5f), -1, SCREEN_W);
   float y = ya + grad * (xs - xa);
   for (int x = xs; x <= xe; x++, y += grad) {
+    if (!(y > -2.0f && y < SCREEN_W + 1.0f)) continue;
     int yi = (int)floorf(y);
     int a = (int)((y - yi) * 255);
     int a0 = (255 - a) * alpha / 255, a1 = a * alpha / 255;
@@ -62,14 +73,13 @@ void Canvas::line(float xa, float ya, float xb, float yb, Color c, int alpha) {
 }
 
 void Canvas::ring(float cx, float cy, float r, Color c) {
-  int ya = (int)floorf(cy - r - 1), yb = (int)ceilf(cy + r + 1);
-  if (ya < y0) ya = y0;
-  if (yb >= y0 + rows) yb = y0 + rows - 1;
+  if (!finite4(cx, cy, r, 0)) return;
+  int ya = clampInt(floorf(cy - r - 1), y0, y0 + rows), yb = clampInt(ceilf(cy + r + 1), y0 - 1, y0 + rows - 1);
   for (int y = ya; y <= yb; y++) {
     float dy = y - cy, h2 = (r + 1) * (r + 1) - dy * dy;
     if (h2 < 0) continue;
     float half = sqrtf(h2);
-    int xa = (int)floorf(cx - half), xb = (int)ceilf(cx + half);
+    int xa = clampInt(floorf(cx - half), 0, SCREEN_W), xb = clampInt(ceilf(cx + half), -1, SCREEN_W - 1);
     for (int x = xa; x <= xb; x++) {
       float d = fabsf(sqrtf((x - cx) * (x - cx) + dy * dy) - r);
       if (d < 1.0f) blend(x, y, c, (int)((1.0f - d) * 255));
@@ -78,11 +88,11 @@ void Canvas::ring(float cx, float cy, float r, Color c) {
 }
 
 void Canvas::disc(float cx, float cy, float r, Color c) {
-  int ya = (int)floorf(cy - r - 1), yb = (int)ceilf(cy + r + 1);
-  if (ya < y0) ya = y0;
-  if (yb >= y0 + rows) yb = y0 + rows - 1;
+  if (!finite4(cx, cy, r, 0)) return;
+  int ya = clampInt(floorf(cy - r - 1), y0, y0 + rows), yb = clampInt(ceilf(cy + r + 1), y0 - 1, y0 + rows - 1);
+  int xa = clampInt(floorf(cx - r - 1), 0, SCREEN_W), xb = clampInt(ceilf(cx + r + 1), -1, SCREEN_W - 1);
   for (int y = ya; y <= yb; y++)
-    for (int x = (int)floorf(cx - r - 1); x <= (int)ceilf(cx + r + 1); x++) {
+    for (int x = xa; x <= xb; x++) {
       float d = r + 0.5f - sqrtf((x - cx) * (x - cx) + (y - cy) * (y - cy));
       if (d > 0) blend(x, y, c, d >= 1 ? 255 : (int)(d * 255));
     }
@@ -91,16 +101,16 @@ void Canvas::disc(float cx, float cy, float r, Color c) {
 void Canvas::triangle(float ax, float ay, float bx, float by, float cx, float cy, Color c) {
   float minx = fminf(ax, fminf(bx, cx)), maxx = fmaxf(ax, fmaxf(bx, cx));
   float miny = fminf(ay, fminf(by, cy)), maxy = fmaxf(ay, fmaxf(by, cy));
-  int ya = (int)floorf(miny), yb = (int)ceilf(maxy);
-  if (ya < y0) ya = y0;
-  if (yb >= y0 + rows) yb = y0 + rows - 1;
+  if (!finite4(minx, maxx, miny, maxy)) return;
+  int ya = clampInt(floorf(miny), y0, y0 + rows), yb = clampInt(ceilf(maxy), y0 - 1, y0 + rows - 1);
+  int xa = clampInt(floorf(minx), 0, SCREEN_W), xb = clampInt(ceilf(maxx), -1, SCREEN_W - 1);
   float area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
   if (fabsf(area) < 1e-6f) return;
   float s = area < 0 ? -1.0f : 1.0f;
   // 2x2 supersampling gives soft edges on what are very small shapes
   static const float off[2] = {0.25f, 0.75f};
   for (int y = ya; y <= yb; y++)
-    for (int x = (int)floorf(minx); x <= (int)ceilf(maxx); x++) {
+    for (int x = xa; x <= xb; x++) {
       int hit = 0;
       for (int j = 0; j < 2; j++)
         for (int i = 0; i < 2; i++) {
@@ -114,7 +124,7 @@ void Canvas::triangle(float ax, float ay, float bx, float by, float cx, float cy
     }
 }
 
-int Canvas::textWidth(const char *s, int scale) { return (int)strlen(s) * 6 * scale - scale; }
+int Canvas::textWidth(const char *s, int scale) { return *s ? (int)strlen(s) * 6 * scale - scale : 0; }
 
 void Canvas::text(int x, int y, const char *s, int scale, Color c) {
   if (y + 8 * scale <= y0 || y >= y0 + rows) return;
