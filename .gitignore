@@ -9,3 +9,4 @@ sim/radarmash-sim
 secrets.h
 .DS_Store
 .claude/
+build/

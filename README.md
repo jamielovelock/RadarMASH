@@ -12,6 +12,7 @@ simulator.
 |---|---|
 | `core/` | Portable C++ drawing code and the radar screen. No hardware dependencies. |
 | `sim/` | Desktop simulator: runs `core/` on your computer and shows the screen in a web browser. |
+| `tests/` | Unit tests for `core/`. |
 
 The device firmware will be added as its own folder and will build the same `core/` code.
 
@@ -24,6 +25,17 @@ You need a C++17 compiler and `make` (macOS or Linux).
 Then open http://localhost:8360. "Short press" and "Long press" stand in for the device's single button.
 
 To save one frame instead: `sim/radarmash-sim --shot frame.bmp --t 9000 --select 0`
+
+## Tests
+
+    make test      # unit tests for the drawing code and radar behaviour
+    make check     # what CI runs: the tests, then a simulator smoke test
+
+The tests need only a C++ compiler. CI runs them on every push with both GCC and Clang, with memory and
+undefined-behaviour checking switched on. Run one group with `build/tests <part of a test name>`.
+
+One test matters more than the rest: drawing the screen in narrow strips, as the device does, must give exactly the same
+picture as drawing it whole.
 
 ## Licence
 

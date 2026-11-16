@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Tests and simulator (${{ matrix.cxx }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests and simulator smoke test
+        run: make check CXX=${{ matrix.cxx }} WERROR=-Werror
+      - name: Keep the rendered frame
+        if: always() && matrix.cxx == 'g++'
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-frame
+          path: build/smoke.bmp
+          if-no-files-found: ignore
