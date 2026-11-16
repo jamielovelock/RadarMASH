@@ -398,7 +398,7 @@ void demoTraffic(Radar &r, uint32_t now_ms) {
     a.lat = r.home_lat + n / 110.57; a.lon = r.home_lon + e / km_per_deg_lon;
     a.alt_ft = d.alt_ft; a.track_deg = trk; a.speed_kt = d.speed_kt;
     a.live = false; a.on_ground = false;
-    snprintf(a.hex, sizeof a.hex, "d%05d", i);
+    snprintf(a.hex, sizeof a.hex, "d%04x", (unsigned)i & 0xffffu);   // made-up address, unique per demo flight
     a.trail_len = 0;
     for (int k = 1; k <= TRAIL_POINTS; k++) {
       float back = km - k * trail_step_km;
