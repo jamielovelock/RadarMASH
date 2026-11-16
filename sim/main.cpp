@@ -108,22 +108,10 @@ static std::vector<uint8_t> bmp() {
   return b;
 }
 
-// Feature switches, by the names the web page uses. The device's settings page will use the same names.
-static const struct { const char *name, *label; bool Settings::*field; } TOGGLES[] = {
-  {"sweep", "Sweep", &Settings::sweep}, {"rings", "Range rings", &Settings::rings}, {"labels", "Callsigns", &Settings::labels},
-  {"altitude", "Altitude", &Settings::altitude}, {"trails", "Trails", &Settings::trails}, {"fade", "Fade after sweep", &Settings::fade},
-  {"shapes", "Aircraft shapes", &Settings::shapes}, {"auto_cycle", "Auto-cycle", &Settings::auto_cycle},
-  {"tag", "Tag box", &Settings::tag}, {"tag_route", "Tag: route", &Settings::tag_route}, {"tag_type", "Tag: type", &Settings::tag_type},
-  {"tag_level", "Tag: level", &Settings::tag_level}, {"tag_speed", "Tag: speed", &Settings::tag_speed},
-  {"card", "Large card", &Settings::card}, {"map", "Map", &Settings::map},
-};
-static bool *settingByName(const std::string &n) {
-  for (auto &t : TOGGLES) if (n == t.name) return &(radar.set.*t.field);
-  return nullptr;
-}
 static std::string settingsJson() {
   std::string j = "[";
-  for (auto &t : TOGGLES) {
+  for (int i = 0; i < TOGGLE_COUNT; i++) {
+    const Toggle &t = TOGGLES[i];
     if (j.size() > 1) j += ",";
     j += std::string("{\"name\":\"") + t.name + "\",\"label\":\"" + t.label + "\",\"on\":" + (radar.set.*t.field ? "true" : "false") + "}";
   }
@@ -199,7 +187,7 @@ static int serve(int port) {
       else if (path == "/press") { radar.shortPress(); respond(fd, "text/plain", "ok", 2); }
       else if (path == "/hold") { radar.longPress(); respond(fd, "text/plain", "ok", 2); }
       else if (path.rfind("/toggle/", 0) == 0) {
-        bool *f = settingByName(path.substr(8));
+        bool *f = toggleByName(radar.set, path.substr(8).c_str());
         if (f) *f = !*f;
         respond(fd, "text/plain", "ok", 2);
       }

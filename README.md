@@ -3,8 +3,9 @@
 Open firmware for the GeekMagic Radar 360 (model `radar21en`): a 2.1" round, 360x360 desk display that shows the aircraft
 around you. Named in honour of Radar O'Reilly, who always heard the choppers first.
 
-**Status: early development. There is no firmware to flash yet.** What exists today is the drawing code and a desktop
-simulator.
+**Status: early development.** The simulator is the easy way to try it. The device firmware is a development build that
+boots and shows live aircraft, but it has no map, no saved settings and no Wi-Fi setup screen yet, and is not ready for
+general use.
 
 ## Layout
 
@@ -13,8 +14,10 @@ simulator.
 | `core/` | Portable C++ drawing code and the radar screen. No hardware dependencies. |
 | `sim/` | Desktop simulator: runs `core/` on your computer and shows the screen in a web browser, with demo or live aircraft. |
 | `tests/` | Unit tests for `core/`. |
+| `firmware/` | Device firmware (PlatformIO, Arduino for ESP32-S3). |
+| `tools/` | Build helpers. |
 
-The device firmware will be added as its own folder and will build the same `core/` code.
+The firmware builds the same `core/` code as the simulator, so what you see in one is what the other draws.
 
 ## Running the simulator
 
@@ -52,6 +55,23 @@ The default is OpenStreetMap's own tile server, which needs no key. Its
 [usage policy](https://operations.osmfoundation.org/policies/tiles/) applies: tiles are cached (the simulator keeps them
 in `~/.cache/radarmash` for 30 days), only what is on screen is fetched, and the credit stays visible. Map data is
 (c) OpenStreetMap contributors.
+
+## Firmware (development build)
+
+**Read this before flashing anything.** The Radar 360's case is sealed and it has no USB data connection, so Wi-Fi is
+the only way to load firmware. A build that cannot join Wi-Fi and accept an update, once made permanent, cannot be
+replaced. The firmware is written around that:
+
+- It never makes itself permanent at start-up. Until it is confirmed, any reset or power cycle returns to the firmware
+  in the other slot (the stock firmware, if that is what you came from).
+- Left alone for 30 minutes while unconfirmed, it goes back by itself. Holding the button for 8 seconds does the same.
+- Its own updater writes only the other slot, and confirms itself first so a failed upload never leaves nothing bootable.
+- Only ever upload the app image. Never write a bootloader, partition table or "factory" image.
+
+To build: copy `firmware/include/secrets.example.h` to `secrets.h`, fill in your Wi-Fi details, and run
+`firmware/build.sh` (needs PlatformIO). That produces `radarmash-radar21en.bin`, which the stock firmware's updater
+accepts: `curl -H 'Content-Type: application/octet-stream' --data-binary @radarmash-radar21en.bin http://DEVICE/api/ota`.
+Stock refuses uploads for about a minute after it boots. The device then serves a small control page.
 
 ## Tests
 

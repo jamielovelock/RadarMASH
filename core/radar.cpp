@@ -28,6 +28,22 @@ static inline float fastAtan2(float y, float x) {
   return y < 0 ? -r : r;
 }
 
+const Toggle TOGGLES[] = {
+  {"sweep", "Sweep", &Settings::sweep}, {"rings", "Range rings", &Settings::rings}, {"labels", "Callsigns", &Settings::labels},
+  {"altitude", "Altitude", &Settings::altitude}, {"trails", "Trails", &Settings::trails}, {"fade", "Fade after sweep", &Settings::fade},
+  {"shapes", "Aircraft shapes", &Settings::shapes}, {"auto_cycle", "Auto-cycle", &Settings::auto_cycle},
+  {"tag", "Tag box", &Settings::tag}, {"tag_route", "Tag: route", &Settings::tag_route}, {"tag_type", "Tag: type", &Settings::tag_type},
+  {"tag_level", "Tag: level", &Settings::tag_level}, {"tag_speed", "Tag: speed", &Settings::tag_speed},
+  {"card", "Large card", &Settings::card}, {"map", "Map", &Settings::map},
+};
+const int TOGGLE_COUNT = (int)(sizeof TOGGLES / sizeof TOGGLES[0]);
+
+bool *toggleByName(Settings &s, const char *name) {
+  for (int i = 0; i < TOGGLE_COUNT; i++)
+    if (strcmp(TOGGLES[i].name, name) == 0) return &(s.*TOGGLES[i].field);
+  return nullptr;
+}
+
 // Next aircraft in view after `from`. With wrap, goes round for ever; without, ends on -1 (nothing highlighted).
 static int nextInView(const Radar &r, int from, bool wrap) {
   float x, y;
@@ -130,36 +146,44 @@ void Radar::longPress() {
 }
 
 // Background: rings, axes and the sweep trail, computed per pixel so the rings and the trail are smooth.
+// This runs for every pixel of every frame, and the device has no fast square root or division, so it only does the
+// expensive sums where they are needed: the square root near a ring, the angle on the half of the scope behind the sweep.
 static void drawScope(Canvas &c, const Settings &set, float sweep_deg, const MapImage *map) {
   const int bright = set.map_brightness > 100 ? 100 : set.map_brightness;
+  const float outer2 = (RADAR_RADIUS + 1.0f) * (RADAR_RADIUS + 1.0f);
+  float ring_r[3], ring_lo2[3], ring_hi2[3];
+  int rings = 0;
+  for (int k = set.rings ? 1 : 3; k <= 3; k++) {                   // with rings off, the outer edge is still drawn
+    float rr = RADAR_RADIUS * k / 3.0f;
+    ring_r[rings] = rr; ring_lo2[rings] = (rr - 1.0f) * (rr - 1.0f); ring_hi2[rings] = (rr + 1.0f) * (rr + 1.0f);
+    rings++;
+  }
+  const float sweep_rad = sweep_deg * PI_F / 180.0f, sx = sinf(sweep_rad), sy = -cosf(sweep_rad);   // unit vector along the sweep
+  const float to_deg = 180.0f / PI_F;
+
   for (int y = c.y0; y < c.y0 + c.rows; y++) {
     uint16_t *row = c.row(y);
+    const uint16_t *map_row = map ? map->px + y * SCREEN_W : nullptr;
     float dy = y - CENTRE;
     for (int x = 0; x < SCREEN_W; x++) {
       float dx = x - CENTRE;
-      float r = sqrtf(dx * dx + dy * dy);
-      if (r > RADAR_RADIUS + 1.0f) { row[x] = 0; continue; }
+      float r2 = dx * dx + dy * dy;
+      if (r2 > outer2) { row[x] = 0; continue; }
       float g = 10.0f;                                             // faint scope glow
-      if (set.rings) {
-        for (int k = 1; k <= 3; k++) {
-          float d = fabsf(r - RADAR_RADIUS * k / 3.0f);
-          if (d < 1.0f) g += (1.0f - d) * 110.0f;
+      for (int k = 0; k < rings; k++)
+        if (r2 > ring_lo2[k] && r2 < ring_hi2[k]) g += (1.0f - fabsf(sqrtf(r2) - ring_r[k])) * 110.0f;
+      if (set.rings && (fabsf(dx) < 0.6f || fabsf(dy) < 0.6f)) g += 35.0f;
+      if (set.sweep && r2 > 4.0f) {
+        float cross = sy * dx - sx * dy;                           // positive on the side the sweep has just left
+        if (cross > 0) {
+          float behind = fastAtan2(cross, dx * sx + dy * sy) * to_deg;   // degrees since the sweep passed this pixel
+          if (behind < TRAIL_DEG) { float t = 1.0f - behind / TRAIL_DEG; g += t * t * 120.0f; }
         }
-        if (fabsf(dx) < 0.6f || fabsf(dy) < 0.6f) g += 35.0f;
-      } else {
-        float d = fabsf(r - RADAR_RADIUS);                         // always keep the outer edge
-        if (d < 1.0f) g += (1.0f - d) * 110.0f;
       }
-      if (set.sweep && r > 2.0f) {
-        float bearing = fastAtan2(dx, -dy) * 180.0f / PI_F;        // 0 = up, clockwise
-        float behind = sweep_deg - bearing;
-        if (behind < 0) behind += 360.0f;
-        if (behind >= 360.0f) behind -= 360.0f;
-        if (behind < TRAIL_DEG) { float t = 1.0f - behind / TRAIL_DEG; g += t * t * 120.0f; }
-      }
+      if (g > 255.0f) g = 255.0f;
       int r8 = (int)(g * 0.10f), g8 = (int)g, b8 = (int)(g * 0.45f);
-      if (map) {                                                   // scope glow is added on top of the dimmed map
-        uint16_t m = map->px[y * SCREEN_W + x];
+      if (map_row) {                                               // scope glow is added on top of the dimmed map
+        uint16_t m = map_row[x];
         r8 += ((m >> 11) << 3) * bright / 100; g8 += (((m >> 5) & 63) << 2) * bright / 100; b8 += ((m & 31) << 3) * bright / 100;
       }
       row[x] = rgb(r8 > 255 ? 255 : r8, g8 > 255 ? 255 : g8, b8 > 255 ? 255 : b8);

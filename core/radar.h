@@ -58,6 +58,12 @@ struct Settings {
   uint8_t max_aircraft = 10;                  // show at most this many, nearest home first (up to MAX_AIRCRAFT)
 };
 
+// The on/off switches by name, for settings pages. The simulator and the device both serve these.
+struct Toggle { const char *name, *label; bool Settings::*field; };
+extern const Toggle TOGGLES[];
+extern const int TOGGLE_COUNT;
+bool *toggleByName(Settings &s, const char *name);      // nullptr if there is no such switch
+
 constexpr int MAX_AIRCRAFT = 64;
 constexpr float RADAR_RADIUS = 172.0f;    // outer range ring, in pixels
 constexpr float RANGES_KM[] = {10, 20, 40, 80, 160};   // the zoom levels a long press steps through

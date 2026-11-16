@@ -293,6 +293,17 @@ TEST(every_switch_changes_the_picture) {
   CHECK(renderWhole(*r) == base);
 }
 
+TEST(switches_can_be_found_by_name) {
+  Settings s;
+  CHECK(TOGGLE_COUNT >= 15);
+  for (int i = 0; i < TOGGLE_COUNT; i++) {
+    bool *f = toggleByName(s, TOGGLES[i].name);
+    CHECK(f == &(s.*TOGGLES[i].field));
+    for (int k = 0; k < i; k++) CHECK(strcmp(TOGGLES[i].name, TOGGLES[k].name) != 0);   // names are unique
+  }
+  CHECK(toggleByName(s, "no_such_switch") == nullptr && toggleByName(s, "") == nullptr);
+}
+
 TEST(awkward_aircraft_data_does_not_break_drawing) {
   auto r = blankRadar();
   place(*r, 0, "EDGE", 39.2, 0); place(*r, 1, "TOP", 0, 39.2); place(*r, 2, "BOT", 0, -39.2); place(*r, 3, "LEFT", -39.2, 0);
