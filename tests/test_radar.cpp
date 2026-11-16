@@ -273,7 +273,7 @@ TEST(awkward_aircraft_data_does_not_break_drawing) {
   place(*r, 4, "CENTRE", 0, 0);
   for (int i = 0; i < r->count; i++) {
     Aircraft &a = r->ac[i];
-    snprintf(a.airline, sizeof a.airline, "%s", "An Airline With A Long Name");
+    memset(a.airline, 'W', sizeof a.airline - 1); a.airline[sizeof a.airline - 1] = 0;   // the longest and widest name that fits
     a.alt_ft = i == 0 ? -500 : 99900; a.track_deg = 359.9f; a.speed_kt = 9999;
     a.shape = (Shape)(i % 6);
     a.trail_len = TRAIL_POINTS;

@@ -221,7 +221,7 @@ static void drawAircraft(Canvas &c, const Radar &r, const Aircraft &a, float x, 
   int lx = (x + 16 + w < CENTRE + RADAR_RADIUS - 8) ? (int)x + 16 : (int)x - 16 - w;
   c.text(lx, (int)y - 16, a.callsign, 2, sel ? COL_SEL : COL_LABEL);
   if (set.altitude) {
-    char fl[8];
+    char fl[12];                                                     // room for any int, however odd the data
     snprintf(fl, sizeof fl, "%03d", a.alt_ft / 100);
     c.text(lx, (int)y + 2, fl, 1, COL_TEXT_DIM);
   }
@@ -251,7 +251,7 @@ void Radar::draw(Canvas &c) const {
     float t = sweep_deg * PI_F / 180.0f;
     c.line(CENTRE, CENTRE, CENTRE + sinf(t) * RADAR_RADIUS, CENTRE - cosf(t) * RADAR_RADIUS, COL_SWEEP);
   }
-  char label[12];
+  char label[20];
   snprintf(label, sizeof label, "%d km", (int)range_km);
   c.text((int)CENTRE + 5, (int)(CENTRE - RADAR_RADIUS) + 6, label, 1, COL_TEXT_DIM);
   c.text((int)CENTRE - 11, (int)(CENTRE - RADAR_RADIUS) + 6, "N", 1, COL_TEXT_DIM);
