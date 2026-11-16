@@ -1,0 +1,11 @@
+# build output
+sim/radarmash-sim
+*.o
+*.bmp
+*.png
+.pio/
+*.bin
+# never commit credentials
+secrets.h
+.DS_Store
+.claude/
