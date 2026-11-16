@@ -43,7 +43,7 @@ void Canvas::blendRect(int x, int y, int w, int h, Color c, int alpha) {
 }
 
 // Xiaolin Wu style: walk the major axis and split coverage between the two nearest pixels on the minor axis.
-void Canvas::line(float xa, float ya, float xb, float yb, Color c) {
+void Canvas::line(float xa, float ya, float xb, float yb, Color c, int alpha) {
   float lo = ya < yb ? ya : yb, hi = ya < yb ? yb : ya;
   if (hi < y0 - 1 || lo > y0 + rows) return;                   // wholly outside this band
   bool steep = fabsf(yb - ya) > fabsf(xb - xa);
@@ -55,8 +55,9 @@ void Canvas::line(float xa, float ya, float xb, float yb, Color c) {
   for (int x = xs; x <= xe; x++, y += grad) {
     int yi = (int)floorf(y);
     int a = (int)((y - yi) * 255);
-    if (steep) { blend(yi, x, c, 255 - a); blend(yi + 1, x, c, a); }
-    else { blend(x, yi, c, 255 - a); blend(x, yi + 1, c, a); }
+    int a0 = (255 - a) * alpha / 255, a1 = a * alpha / 255;
+    if (steep) { blend(yi, x, c, a0); blend(yi + 1, x, c, a1); }
+    else { blend(x, yi, c, a0); blend(x, yi + 1, c, a1); }
   }
 }
 

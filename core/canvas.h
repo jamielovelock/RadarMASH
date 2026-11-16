@@ -32,7 +32,7 @@ struct Canvas {
   void fill(Color c);
   void rect(int x, int y, int w, int h, Color c);
   void blendRect(int x, int y, int w, int h, Color c, int alpha);
-  void line(float x0, float y0, float x1, float y1, Color c);  // anti-aliased
+  void line(float x0, float y0, float x1, float y1, Color c, int alpha = 255);  // anti-aliased
   void ring(float cx, float cy, float r, Color c);             // anti-aliased 1 px circle outline
   void disc(float cx, float cy, float r, Color c);             // anti-aliased filled circle
   void triangle(float ax, float ay, float bx, float by, float cx, float cy, Color c);   // filled

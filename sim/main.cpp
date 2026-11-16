@@ -51,21 +51,46 @@ static std::vector<uint8_t> bmp() {
   return b;
 }
 
+// Feature switches, by the names the web page uses. The device's settings page will use the same names.
+static const struct { const char *name, *label; bool Settings::*field; } TOGGLES[] = {
+  {"sweep", "Sweep", &Settings::sweep}, {"rings", "Range rings", &Settings::rings}, {"labels", "Callsigns", &Settings::labels},
+  {"altitude", "Altitude", &Settings::altitude}, {"trails", "Trails", &Settings::trails},
+  {"shapes", "Aircraft shapes", &Settings::shapes}, {"auto_cycle", "Auto-cycle", &Settings::auto_cycle},
+  {"tag", "Tag box", &Settings::tag}, {"tag_route", "Tag: route", &Settings::tag_route}, {"tag_type", "Tag: type", &Settings::tag_type},
+  {"tag_level", "Tag: level", &Settings::tag_level}, {"tag_speed", "Tag: speed", &Settings::tag_speed},
+  {"card", "Large card", &Settings::card},
+};
+static bool *settingByName(const std::string &n) {
+  for (auto &t : TOGGLES) if (n == t.name) return &(radar.set.*t.field);
+  return nullptr;
+}
+static std::string settingsJson() {
+  std::string j = "[";
+  for (auto &t : TOGGLES) {
+    if (j.size() > 1) j += ",";
+    j += std::string("{\"name\":\"") + t.name + "\",\"label\":\"" + t.label + "\",\"on\":" + (radar.set.*t.field ? "true" : "false") + "}";
+  }
+  return j + "]";
+}
+
 static const char PAGE[] = R"HTML(<!doctype html><meta charset=utf-8><title>RadarMASH simulator</title>
 <style>
 body{background:#16181c;color:#bbb;font:14px system-ui;text-align:center;margin:0;padding:24px}
 .case{display:inline-block;padding:14px;border-radius:50%;background:#050505;box-shadow:0 0 0 3px #2a2a2a}
 img{display:block;width:540px;height:540px;border-radius:50%;image-rendering:pixelated;background:#000}
-button{font:inherit;margin:14px 6px;padding:8px 16px} small{display:block;opacity:.6}
+button{font:inherit;margin:14px 6px;padding:8px 16px} label{margin:0 8px;white-space:nowrap;display:inline-block;line-height:1.9} #t{margin:0 0 12px} small{display:block;opacity:.6}
 </style>
 <div class=case><img id=s width=360 height=360 alt="radar screen"></div>
 <div><button id=sp>Short press</button><button id=lp>Long press</button><button id=px>Actual pixels</button></div>
-<small>Short press: next aircraft. Long press: change range. Demo traffic runs 20x faster than life.</small>
+<div id=t></div>
+<small>Short press: next aircraft. Long press: change range. Auto-cycle moves on every 5 s. Demo traffic runs 20x faster than life.</small>
 <script>
 const s=document.getElementById('s');let big=true;
 document.getElementById('sp').onclick=()=>fetch('/press');
 document.getElementById('lp').onclick=()=>fetch('/hold');
 document.getElementById('px').onclick=()=>{big=!big;s.style.width=s.style.height=(big?540:360)+'px'};
+fetch('/settings').then(r=>r.json()).then(a=>{const t=document.getElementById('t');for(const o of a){const l=document.createElement('label'),
+c=document.createElement('input');c.type='checkbox';c.checked=o.on;c.onchange=()=>fetch('/toggle/'+o.name);l.append(c,' '+o.label);t.append(l)}});
 async function loop(){for(;;){try{const b=await(await fetch('/frame')).blob();const u=URL.createObjectURL(b);
 await new Promise(r=>{s.onload=s.onerror=r;s.src=u});URL.revokeObjectURL(u)}catch(e){await new Promise(r=>setTimeout(r,500))}
 await new Promise(r=>setTimeout(r,50))}}loop();
@@ -99,6 +124,12 @@ static int serve(int port) {
       if (path == "/frame") { render(nowMs()); auto b = bmp(); respond(fd, "image/bmp", b.data(), b.size()); }
       else if (path == "/press") { radar.shortPress(); respond(fd, "text/plain", "ok", 2); }
       else if (path == "/hold") { radar.longPress(); respond(fd, "text/plain", "ok", 2); }
+      else if (path.rfind("/toggle/", 0) == 0) {
+        bool *f = settingByName(path.substr(8));
+        if (f) *f = !*f;
+        respond(fd, "text/plain", "ok", 2);
+      }
+      else if (path == "/settings") { std::string j = settingsJson(); respond(fd, "application/json", j.data(), j.size()); }
       else respond(fd, "text/html", PAGE, sizeof PAGE - 1);
     }
     close(fd);
@@ -119,6 +150,7 @@ int main(int argc, char **argv) {
   if (range > 0) radar.range_km = range;
   if (!shot) return serve(port);
   demoTraffic(radar, t);
+  radar.set.auto_cycle = false;          // a still frame shows exactly the aircraft asked for
   radar.selected = select;
   render(t);
   auto b = bmp();
