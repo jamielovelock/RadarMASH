@@ -18,13 +18,25 @@ The device firmware will be added as its own folder and will build the same `cor
 
 ## Running the simulator
 
-You need a C++17 compiler and `make` (macOS or Linux).
+You need a C++17 compiler and `make` (macOS or Linux), plus `curl` if you want the map.
 
     make -C sim run
 
 Then open http://localhost:8360. "Short press" and "Long press" stand in for the device's single button.
 
 To save one frame instead: `sim/radarmash-sim --shot frame.bmp --t 9000 --select 0`
+
+## Map underlay
+
+The radar can draw over a map built from standard 256-pixel web map tiles. The source is a URL pattern such as
+`https://tile.openstreetmap.org/{z}/{x}/{y}.png`, so any provider that serves tiles this way can be used; the simulator page
+has a box for the pattern, the credit line the provider asks for, a style (as is, dark, green) and brightness. Light maps
+are turned dark in software. The zoom follows the radar range.
+
+The default is OpenStreetMap's own tile server, which needs no key. Its
+[usage policy](https://operations.osmfoundation.org/policies/tiles/) applies: tiles are cached (the simulator keeps them
+in `~/.cache/radarmash` for 30 days), only what is on screen is fetched, and the credit stays visible. Map data is
+(c) OpenStreetMap contributors.
 
 ## Tests
 
@@ -39,7 +51,7 @@ picture as drawing it whole.
 
 ## Licence
 
-GPL-3.0-or-later; see `LICENSE`. `core/font5x7.h` comes from the Adafruit GFX Library and stays under its BSD licence,
-reproduced in that file.
+GPL-3.0-or-later; see `LICENSE`. Two bundled files keep their own licences, reproduced inside them: `core/font5x7.h`
+(Adafruit GFX Library, BSD) and `sim/third_party/stb_image.h` (stb, public domain / MIT; simulator only).
 
 RadarMASH is an independent hobby project. It is not affiliated with GeekMagic, and contains none of their code.

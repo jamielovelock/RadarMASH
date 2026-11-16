@@ -92,7 +92,11 @@ TEST(long_press_cycles_range) {
   auto r = blankRadar();
   r->selected = 0;
   r->longPress(); CHECK_NEAR(r->range_km, 80, 0.01); CHECK(r->selected == -1);
+  r->longPress(); CHECK_NEAR(r->range_km, 160, 0.01);
+  r->longPress(); CHECK_NEAR(r->range_km, 10, 0.01);    // wraps round to the closest view
   r->longPress(); CHECK_NEAR(r->range_km, 20, 0.01);
+  r->longPress(); CHECK_NEAR(r->range_km, 40, 0.01);
+  r->range_km = 33;                                     // an odd value from saved settings still steps sensibly
   r->longPress(); CHECK_NEAR(r->range_km, 40, 0.01);
 }
 
@@ -211,6 +215,28 @@ TEST(demo_aircraft_point_the_way_they_move) {
   }
 }
 
+TEST(aircraft_fade_until_the_sweep_returns) {
+  // Just after the sweep has passed an aircraft it is at its brightest; just before the sweep arrives, its dimmest.
+  auto r = blankRadar();
+  place(*r, 0, "E", 20, 0);                        // due east: bearing 90
+  r->ac[0].shape = Shape::Narrow;
+  r->set.trails = false; r->set.labels = false;
+  auto brightest = [&](uint32_t t) {
+    r->tick(t);
+    Pixels px = renderWhole(*r);
+    float x, y; r->project(r->ac[0], x, y);
+    int best = 0;
+    for (int dy = -3; dy <= 3; dy++)
+      for (int dx = -3; dx <= 3; dx++) { int red = px[(size_t)((int)y + dy) * SCREEN_W + (int)x + dx] >> 11; if (red > best) best = red; }
+    return best;
+  };
+  int just_passed = brightest(1100), half_way = brightest(3000), about_to_arrive = brightest(4900);   // sweep at 99, 270, 81 degrees
+  CHECK(just_passed > half_way);
+  CHECK(half_way > about_to_arrive);
+  r->set.fade = false;
+  CHECK(brightest(4900) == brightest(1100));
+}
+
 // ---- drawing ----
 TEST(drawing_in_strips_matches_drawing_whole) {
   // The device has no room for a full frame and draws 40 rows at a time. The result must be identical.
@@ -256,7 +282,7 @@ TEST(every_switch_changes_the_picture) {
   r->selected = 0;
   r->set.card = true;                              // so the card switch has something to remove
   const Pixels base = renderWhole(*r);
-  bool Settings::*const switches[] = {&Settings::sweep, &Settings::rings, &Settings::labels, &Settings::altitude, &Settings::trails,
+  bool Settings::*const switches[] = {&Settings::sweep, &Settings::rings, &Settings::labels, &Settings::altitude, &Settings::trails, &Settings::fade,
                                       &Settings::shapes, &Settings::tag, &Settings::tag_route, &Settings::tag_type,
                                       &Settings::tag_level, &Settings::tag_speed, &Settings::card};
   for (auto sw : switches) {

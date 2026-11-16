@@ -5,6 +5,7 @@
 // Portable: shared by the device firmware and the desktop simulator.
 #pragma once
 #include "canvas.h"
+#include "map.h"
 #include <stdint.h>
 
 namespace rm {
@@ -36,6 +37,7 @@ struct Settings {
   bool labels = true;         // callsign next to each aircraft
   bool altitude = true;       // flight level under the callsign
   bool trails = true;         // where each aircraft has been
+  bool fade = true;           // aircraft flash bright as the sweep passes, then fade until it comes round again
   bool shapes = true;         // silhouettes by aircraft kind (off: plain arrowheads)
   bool tag = true;            // small box beside the highlighted aircraft; the tag_ switches choose what it shows
   bool tag_route = true;
@@ -44,10 +46,14 @@ struct Settings {
   bool tag_speed = false;
   bool auto_cycle = true;     // highlight each aircraft in view in turn
   bool card = false;          // large detail card for the highlighted aircraft
+  bool map = true;            // map underlay, when one has been loaded
+  MapStyle map_style = MapStyle::Dark;
+  uint8_t map_brightness = 55;                // percent
 };
 
 constexpr int MAX_AIRCRAFT = 32;
 constexpr float RADAR_RADIUS = 172.0f;    // outer range ring, in pixels
+constexpr float RANGES_KM[] = {10, 20, 40, 80, 160};   // the zoom levels a long press steps through
 
 struct Radar {
   Settings set;
@@ -56,12 +62,14 @@ struct Radar {
   Aircraft ac[MAX_AIRCRAFT];
   int count = 0;
   int selected = -1;          // index into ac, or -1
+  const MapImage *map = nullptr;                // underlay to draw, owned by the caller
+  char map_credit[28] = "";                     // attribution the map source asks for, shown at the bottom
   float sweep_deg = 0;        // current sweep bearing
   uint32_t now_ms = 0, last_cycle_ms = 0;
 
   void tick(uint32_t now_ms);                   // advance the sweep and the auto-cycle
   void shortPress();                            // highlight the next aircraft in view
-  void longPress();                             // cycle range 20 / 40 / 80 km
+  void longPress();                             // step to the next range (zoom level)
   void draw(Canvas &c) const;                   // draw this canvas's band of the screen
 
   void toScreen(double lat, double lon, float &x, float &y) const;

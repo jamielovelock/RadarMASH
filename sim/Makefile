@@ -1,8 +1,8 @@
 CXX ?= c++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra
 
-radarmash-sim: main.cpp ../core/*.cpp ../core/*.h
-	$(CXX) $(CXXFLAGS) main.cpp ../core/*.cpp -o $@
+radarmash-sim: *.cpp *.h ../core/*.cpp ../core/*.h third_party/stb_image.h
+	$(CXX) $(CXXFLAGS) *.cpp ../core/*.cpp -o $@
 
 run: radarmash-sim
 	./radarmash-sim

@@ -74,10 +74,18 @@ void Radar::shortPress() {
   last_cycle_ms = now_ms;                       // a press restarts the dwell on the new aircraft
 }
 
-void Radar::longPress() { range_km = range_km < 30 ? 40 : range_km < 60 ? 80 : 20; selected = -1; }
+void Radar::longPress() {
+  const int n = (int)(sizeof RANGES_KM / sizeof RANGES_KM[0]);
+  int next = 0;
+  for (int i = 0; i < n; i++)
+    if (RANGES_KM[i] > range_km + 0.5f) { next = i; break; }      // first range bigger than now, else back to the smallest
+  range_km = RANGES_KM[next];
+  selected = -1;
+}
 
 // Background: rings, axes and the sweep trail, computed per pixel so the rings and the trail are smooth.
-static void drawScope(Canvas &c, const Settings &set, float sweep_deg) {
+static void drawScope(Canvas &c, const Settings &set, float sweep_deg, const MapImage *map) {
+  const int bright = set.map_brightness > 100 ? 100 : set.map_brightness;
   for (int y = c.y0; y < c.y0 + c.rows; y++) {
     uint16_t *row = c.row(y);
     float dy = y - CENTRE;
@@ -103,8 +111,12 @@ static void drawScope(Canvas &c, const Settings &set, float sweep_deg) {
         if (behind >= 360.0f) behind -= 360.0f;
         if (behind < TRAIL_DEG) { float t = 1.0f - behind / TRAIL_DEG; g += t * t * 120.0f; }
       }
-      if (g > 255.0f) g = 255.0f;
-      row[x] = rgb((int)(g * 0.10f), (int)g, (int)(g * 0.45f));
+      int r8 = (int)(g * 0.10f), g8 = (int)g, b8 = (int)(g * 0.45f);
+      if (map) {                                                   // scope glow is added on top of the dimmed map
+        uint16_t m = map->px[y * SCREEN_W + x];
+        r8 += ((m >> 11) << 3) * bright / 100; g8 += (((m >> 5) & 63) << 2) * bright / 100; b8 += ((m & 31) << 3) * bright / 100;
+      }
+      row[x] = rgb(r8 > 255 ? 255 : r8, g8 > 255 ? 255 : g8, b8 > 255 ? 255 : b8);
     }
   }
 }
@@ -175,6 +187,18 @@ static void drawTrail(Canvas &c, const Radar &r, const Aircraft &a, float x, flo
   }
 }
 
+// Scale a colour's brightness, 0..1.
+static inline Color dim(Color c, float f) {
+  return (Color)(((int)((c >> 11) * f) << 11) | ((int)(((c >> 5) & 63) * f) << 5) | (int)((c & 31) * f));
+}
+
+// How bright an aircraft is: full as the sweep crosses it, falling away until the sweep comes round again.
+static float sweepFade(float x, float y, float sweep_deg) {
+  float bearing = fastAtan2(x - CENTRE, -(y - CENTRE)) * 180.0f / PI_F;
+  float behind = fmodf(sweep_deg - bearing + 720.0f, 360.0f);
+  return 1.0f - 0.7f * behind / 360.0f;
+}
+
 // Small box beside the highlighted aircraft: callsign, then whichever extra lines the settings ask for.
 static void drawTag(Canvas &c, const Settings &set, const Aircraft &a, float x, float y) {
   char route[16] = "", data[32] = "";
@@ -211,6 +235,11 @@ static void drawTag(Canvas &c, const Settings &set, const Aircraft &a, float x, 
 static void drawAircraft(Canvas &c, const Radar &r, const Aircraft &a, float x, float y, bool sel) {
   const Settings &set = r.set;
   Color col = sel ? COL_SEL : a.shape == Shape::Military ? COL_MIL : COL_BLIP;
+  Color label = COL_LABEL, level = COL_TEXT_DIM;
+  if (set.fade && set.sweep && !sel) {                               // the highlighted aircraft always stays bright
+    float f = sweepFade(x, y, r.sweep_deg);
+    col = dim(col, f); label = dim(label, f); level = dim(level, f);
+  }
   if (set.trails) drawTrail(c, r, a, x, y, col);
   drawIcon(c, set.shapes ? a.shape : Shape::Unknown, x, y, a.track_deg, col);
   if (sel) c.ring(x, y, 17, COL_SEL);
@@ -219,11 +248,11 @@ static void drawAircraft(Canvas &c, const Radar &r, const Aircraft &a, float x, 
   // label to the right, or to the left when that would run off the scope
   int w = Canvas::textWidth(a.callsign, 2);
   int lx = (x + 16 + w < CENTRE + RADAR_RADIUS - 8) ? (int)x + 16 : (int)x - 16 - w;
-  c.text(lx, (int)y - 16, a.callsign, 2, sel ? COL_SEL : COL_LABEL);
+  c.text(lx, (int)y - 16, a.callsign, 2, sel ? COL_SEL : label);
   if (set.altitude) {
     char fl[12];                                                     // room for any int, however odd the data
     snprintf(fl, sizeof fl, "%03d", a.alt_ft / 100);
-    c.text(lx, (int)y + 2, fl, 1, COL_TEXT_DIM);
+    c.text(lx, (int)y + 2, fl, 1, level);
   }
 }
 
@@ -245,7 +274,9 @@ static void drawCard(Canvas &c, const Aircraft &a, bool at_top) {
 }
 
 void Radar::draw(Canvas &c) const {
-  drawScope(c, set, sweep_deg);
+  const MapImage *underlay = set.map && map && map->ready ? map : nullptr;
+  drawScope(c, set, sweep_deg, underlay);
+  if (underlay && map_credit[0]) c.textCentred(180, 337, map_credit, 1, rgb(150, 150, 150));
 
   if (set.sweep) {
     float t = sweep_deg * PI_F / 180.0f;

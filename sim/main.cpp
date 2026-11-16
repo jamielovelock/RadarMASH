@@ -4,8 +4,10 @@
 // Desktop simulator. Builds the same drawing code as the device and shows it in a web browser, with no dependencies
 // beyond a C++ compiler:
 //   radarmash-sim                       serve the live screen at http://localhost:8360
-//   radarmash-sim --shot out.bmp [--t ms] [--select n] [--range km]     write one frame and exit
+//   radarmash-sim --shot out.bmp [--t ms] [--select n] [--range km] [--map]     write one frame and exit
+// The map underlay downloads tiles with curl and keeps them in ~/.cache/radarmash. Still frames stay offline unless --map.
 #include "../core/radar.h"
+#include "tiles.h"
 #include <arpa/inet.h>
 #include <chrono>
 #include <netinet/in.h>
@@ -13,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <string>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -28,8 +31,56 @@ static uint32_t nowMs() {
   return (uint32_t)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
 }
 
+// ---- map underlay ----
+static SimTiles tiles;
+static MapImage map_image;
+static bool map_allowed = false;           // may the simulator go to the network for tiles?
+static std::string map_credit = "(c) OpenStreetMap";
+static std::string map_key;                // what the current picture was built for
+
+static void ensureMap() {
+  if (!map_allowed || !radar.set.map) { radar.map = nullptr; return; }
+  char k[160];
+  snprintf(k, sizeof k, "%.5f,%.5f,%.1f,%d,", radar.home_lat, radar.home_lon, radar.range_km, (int)radar.set.map_style);
+  std::string key = k + tiles.url_template;
+  if (key != map_key) {
+    composeMap(map_image, tiles, radar.home_lat, radar.home_lon, radar.range_km, radar.set.map_style);
+    if (map_image.missing == 0) map_key = key;          // otherwise try again on the next frame (failed tiles wait a minute)
+  }
+  radar.map = &map_image;
+  snprintf(radar.map_credit, sizeof radar.map_credit, "%s", map_credit.c_str());
+}
+
+static std::string urlDecode(const std::string &in) {
+  std::string out;
+  for (size_t i = 0; i < in.size(); i++) {
+    if (in[i] == '%' && i + 2 < in.size() + 0 && isxdigit((unsigned char)in[i + 1]) && isxdigit((unsigned char)in[i + 2])) {
+      out += (char)strtol(in.substr(i + 1, 2).c_str(), nullptr, 16); i += 2;
+    } else out += in[i] == '+' ? ' ' : in[i];
+  }
+  return out;
+}
+static std::string queryValue(const std::string &path, const std::string &name) {
+  size_t q = path.find('?');
+  if (q == std::string::npos) return "";
+  std::string rest = path.substr(q + 1);
+  for (size_t p = 0; p < rest.size();) {
+    size_t e = rest.find('&', p); if (e == std::string::npos) e = rest.size();
+    std::string kv = rest.substr(p, e - p); size_t eq = kv.find('=');
+    if (eq != std::string::npos && kv.substr(0, eq) == name) return urlDecode(kv.substr(eq + 1));
+    p = e + 1;
+  }
+  return "";
+}
+static std::string jsonEscape(const std::string &in) {
+  std::string out;
+  for (char ch : in) { if (ch == '"' || ch == '\\') out += '\\'; if ((unsigned char)ch >= 32) out += ch; }
+  return out;
+}
+
 static void render(uint32_t t) {
   demoTraffic(radar, t);
+  ensureMap();
   radar.tick(t);
   Canvas c(frame, 0, SCREEN_H);          // one band covering the whole screen
   radar.draw(c);
@@ -54,11 +105,11 @@ static std::vector<uint8_t> bmp() {
 // Feature switches, by the names the web page uses. The device's settings page will use the same names.
 static const struct { const char *name, *label; bool Settings::*field; } TOGGLES[] = {
   {"sweep", "Sweep", &Settings::sweep}, {"rings", "Range rings", &Settings::rings}, {"labels", "Callsigns", &Settings::labels},
-  {"altitude", "Altitude", &Settings::altitude}, {"trails", "Trails", &Settings::trails},
+  {"altitude", "Altitude", &Settings::altitude}, {"trails", "Trails", &Settings::trails}, {"fade", "Fade after sweep", &Settings::fade},
   {"shapes", "Aircraft shapes", &Settings::shapes}, {"auto_cycle", "Auto-cycle", &Settings::auto_cycle},
   {"tag", "Tag box", &Settings::tag}, {"tag_route", "Tag: route", &Settings::tag_route}, {"tag_type", "Tag: type", &Settings::tag_type},
   {"tag_level", "Tag: level", &Settings::tag_level}, {"tag_speed", "Tag: speed", &Settings::tag_speed},
-  {"card", "Large card", &Settings::card},
+  {"card", "Large card", &Settings::card}, {"map", "Map", &Settings::map},
 };
 static bool *settingByName(const std::string &n) {
   for (auto &t : TOGGLES) if (n == t.name) return &(radar.set.*t.field);
@@ -78,12 +129,16 @@ static const char PAGE[] = R"HTML(<!doctype html><meta charset=utf-8><title>Rada
 body{background:#16181c;color:#bbb;font:14px system-ui;text-align:center;margin:0;padding:24px}
 .case{display:inline-block;padding:14px;border-radius:50%;background:#050505;box-shadow:0 0 0 3px #2a2a2a}
 img{display:block;width:540px;height:540px;border-radius:50%;image-rendering:pixelated;background:#000}
-button{font:inherit;margin:14px 6px;padding:8px 16px} label{margin:0 8px;white-space:nowrap;display:inline-block;line-height:1.9} #t{margin:0 0 12px} small{display:block;opacity:.6}
+button{font:inherit;margin:14px 6px;padding:8px 16px} label{margin:0 8px;white-space:nowrap;display:inline-block;line-height:1.9} #t{margin:0 0 12px} #m{margin:0 0 12px} input,select{font:inherit;background:#22252b;color:#ddd;border:1px solid #444;padding:3px} small{display:block;opacity:.6}
 </style>
 <div class=case><img id=s width=360 height=360 alt="radar screen"></div>
 <div><button id=sp>Short press</button><button id=lp>Long press</button><button id=px>Actual pixels</button></div>
 <div id=t></div>
-<small>Short press: next aircraft. Long press: change range. Auto-cycle moves on every 5 s. Demo traffic runs 20x faster than life.</small>
+<div id=m>Map source <input id=mu size=44> credit <input id=mc size=16>
+ style <select id=ms><option value=0>As is<option value=1>Dark<option value=2>Green</select>
+ brightness <input id=mb type=range min=0 max=100 style="vertical-align:middle;width:90px"> <button id=ma style="margin:4px">Apply</button>
+ <span id=mi></span></div>
+<small>Short press: next aircraft. Long press: next range (zoom). Auto-cycle moves on every 5 s. Demo traffic runs 20x faster than life.</small>
 <script>
 const s=document.getElementById('s');let big=true;
 document.getElementById('sp').onclick=()=>fetch('/press');
@@ -91,6 +146,11 @@ document.getElementById('lp').onclick=()=>fetch('/hold');
 document.getElementById('px').onclick=()=>{big=!big;s.style.width=s.style.height=(big?540:360)+'px'};
 fetch('/settings').then(r=>r.json()).then(a=>{const t=document.getElementById('t');for(const o of a){const l=document.createElement('label'),
 c=document.createElement('input');c.type='checkbox';c.checked=o.on;c.onchange=()=>fetch('/toggle/'+o.name);l.append(c,' '+o.label);t.append(l)}});
+const $=i=>document.getElementById(i);
+function mapInfo(fill){fetch('/mapinfo').then(r=>r.json()).then(j=>{if(fill){$('mu').value=j.url;$('mc').value=j.credit;$('ms').value=j.style;$('mb').value=j.bright}
+$('mi').textContent='range '+j.range+' km, zoom '+j.zoom+(j.missing?', '+j.missing+' tiles missing':'')})}
+function mapApply(){fetch('/map?url='+encodeURIComponent($('mu').value)+'&credit='+encodeURIComponent($('mc').value)+'&style='+$('ms').value+'&bright='+$('mb').value).then(()=>setTimeout(mapInfo,1500))}
+$('ma').onclick=mapApply;$('ms').onchange=mapApply;$('mb').onchange=mapApply;mapInfo(true);setInterval(mapInfo,3000);
 async function loop(){for(;;){try{const b=await(await fetch('/frame')).blob();const u=URL.createObjectURL(b);
 await new Promise(r=>{s.onload=s.onerror=r;s.src=u});URL.revokeObjectURL(u)}catch(e){await new Promise(r=>setTimeout(r,500))}
 await new Promise(r=>setTimeout(r,50))}}loop();
@@ -129,6 +189,21 @@ static int serve(int port) {
         if (f) *f = !*f;
         respond(fd, "text/plain", "ok", 2);
       }
+      else if (path.rfind("/map?", 0) == 0) {               // map source, credit, style and brightness from the page
+        std::string u = queryValue(path, "url"), c = queryValue(path, "credit"), st = queryValue(path, "style"), b = queryValue(path, "bright");
+        if (!u.empty()) tiles.url_template = u;
+        if (path.find("credit=") != std::string::npos) map_credit = c;
+        if (!st.empty()) radar.set.map_style = (MapStyle)(atoi(st.c_str()) % (int)MapStyle::Count);
+        if (!b.empty()) { int v = atoi(b.c_str()); radar.set.map_brightness = (uint8_t)(v < 0 ? 0 : v > 100 ? 100 : v); }
+        respond(fd, "text/plain", "ok", 2);
+      }
+      else if (path == "/mapinfo") {
+        char j[700];
+        int n = snprintf(j, sizeof j, "{\"url\":\"%s\",\"credit\":\"%s\",\"style\":%d,\"bright\":%d,\"zoom\":%d,\"missing\":%d,\"range\":%d,\"fetched\":%d,\"failed\":%d}",
+                         jsonEscape(tiles.url_template).c_str(), jsonEscape(map_credit).c_str(), (int)radar.set.map_style, (int)radar.set.map_brightness,
+                         map_image.zoom, map_image.missing, (int)radar.range_km, tiles.fetched, tiles.failed);
+        respond(fd, "application/json", j, (size_t)(n < (int)sizeof j ? n : (int)sizeof j - 1));
+      }
       else if (path == "/settings") { std::string j = settingsJson(); respond(fd, "application/json", j.data(), j.size()); }
       else respond(fd, "text/html", PAGE, sizeof PAGE - 1);
     }
@@ -137,7 +212,10 @@ static int serve(int port) {
 }
 
 int main(int argc, char **argv) {
-  const char *shot = nullptr; uint32_t t = 2600; int select = -1, port = 8360; float range = 0;
+  const char *shot = nullptr; uint32_t t = 2600; int select = -1, port = 8360; float range = 0; bool want_map = false;
+  tiles.url_template = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+  const char *ua = getenv("RADARMASH_UA");
+  tiles.user_agent = ua && *ua ? ua : "RadarMASH-simulator/0.1";
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--shot" && i + 1 < argc) shot = argv[++i];
@@ -145,9 +223,13 @@ int main(int argc, char **argv) {
     else if (a == "--select" && i + 1 < argc) select = atoi(argv[++i]);
     else if (a == "--range" && i + 1 < argc) range = (float)atof(argv[++i]);
     else if (a == "--port" && i + 1 < argc) port = atoi(argv[++i]);
-    else { fprintf(stderr, "usage: %s [--port n] | --shot out.bmp [--t ms] [--select n] [--range km]\n", argv[0]); return 2; }
+    else if (a == "--map") want_map = true;
+    else if (a == "--no-map") want_map = false, shot = shot ? shot : nullptr, map_allowed = false, radar.set.map = false;
+    else if (a == "--style" && i + 1 < argc) radar.set.map_style = (MapStyle)(atoi(argv[++i]) % (int)MapStyle::Count);
+    else { fprintf(stderr, "usage: %s [--port n] | --shot out.bmp [--t ms] [--select n] [--range km] [--map] [--style 0-2]\n       --no-map with no --shot serves without a map\n", argv[0]); return 2; }
   }
   if (range > 0) radar.range_km = range;
+  map_allowed = shot ? want_map : radar.set.map;        // a still frame stays offline unless asked for --map
   if (!shot) return serve(port);
   demoTraffic(radar, t);
   radar.set.auto_cycle = false;          // a still frame shows exactly the aircraft asked for
