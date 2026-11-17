@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RadarMASH settings</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f4f5f7; --card:#fff; --ink:#1c1f24; --dim:#6b7280; --line:#d9dce1; --accent:#0a8f5b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14161a; --card:#1e2126; --ink:#e6e8eb; --dim:#9aa1ab; --line:#33383f; --accent:#35c98a; } }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui,sans-serif; }
+  main { max-width:44em; margin:0 auto; }
+  h1 { font-size:20px; margin:4px 0 2px; } h2 { font-size:15px; margin:0 0 10px; }
+  #status { color:var(--dim); margin:0 0 14px; min-height:1.4em; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin:0 0 14px; }
+  .row { display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; margin:8px 0; }
+  .row > span:first-child { flex:0 0 9.5em; color:var(--dim); }
+  .checks { display:grid; grid-template-columns:repeat(auto-fill,minmax(11em,1fr)); gap:6px 12px; }
+  input[type=text], input[type=number], select { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:5px 8px; }
+  input[type=text] { flex:1 1 14em; min-width:0; } input[type=number] { width:6.5em; }
+  input[type=range] { flex:1 1 10em; accent-color:var(--accent); } input[type=checkbox] { accent-color:var(--accent); }
+  button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:pointer; }
+  button.go { background:var(--accent); border-color:var(--accent); color:#fff; }
+  small { color:var(--dim); } .hint { margin:6px 0 0; color:var(--dim); font-size:13px; }
+  #saved { float:right; color:var(--accent); opacity:0; transition:opacity .3s; } #saved.on { opacity:1; }
+</style>
+<main>
+  <h1>RadarMASH <span id="saved">saved</span></h1>
+  <p id="status">connecting…</p>
+
+  <section>
+    <h2>Screen</h2>
+    <div class="row"><span>Brightness</span><input type="range" min="1" max="100" data-k="brightness"><small data-show="brightness"></small></div>
+    <div class="row"><span>Range</span><select data-k="range_km" data-num>
+      <option value="10">10 km</option><option value="20">20 km</option><option value="40">40 km</option><option value="80">80 km</option><option value="160">160 km</option></select>
+      <button data-post="/api/press">Next aircraft</button><button data-post="/api/hold">Next range</button></div>
+    <div class="checks" id="toggles"></div>
+  </section>
+
+  <section>
+    <h2>Aircraft</h2>
+    <div class="row"><span>Show</span><select data-k="live" data-bool><option value="false">Demo traffic</option><option value="true">Live aircraft</option></select></div>
+    <div class="row"><span>Your position</span><input type="number" step="0.0001" placeholder="latitude" id="lat"><input type="number" step="0.0001" placeholder="longitude" id="lon">
+      <button class="go" id="sethome">Set</button><button id="here">Use this browser's location</button></div>
+    <p class="hint" id="homehint"></p>
+    <div class="row"><span>Data from</span><select data-k="feed_url">
+      <option value="https://opendata.adsb.fi/api/v3/lat/{lat}/lon/{lon}/dist/{nm}">adsb.fi</option>
+      <option value="https://api.adsb.lol/v2/point/{lat}/{lon}/{nm}">adsb.lol</option></select></div>
+    <div class="row"><span>Refresh every</span><input type="number" min="2" max="300" data-k="refresh_s"><small>seconds</small></div>
+    <div class="row"><span>Show at most</span><input type="number" min="1" max="64" data-k="max_aircraft"><small>aircraft, nearest first</small></div>
+    <div class="row"><span>On the ground</span><label><input type="checkbox" data-k="include_ground"> include aircraft on the ground</label></div>
+  </section>
+
+  <section>
+    <h2>Map</h2>
+    <div class="row"><span>Style</span><select data-k="map_style" data-num><option value="0">As the source draws it</option><option value="1">Dark</option><option value="2">Green</option></select></div>
+    <div class="row"><span>Brightness</span><input type="range" min="0" max="100" data-k="map_brightness"><small data-show="map_brightness"></small></div>
+    <div class="row"><span>Source</span><input type="text" data-k="map_url" spellcheck="false"></div>
+    <div class="row"><span>Credit shown</span><input type="text" data-k="map_credit" maxlength="27"></div>
+    <p class="hint">The source is a tile address with {z}, {x} and {y} in it. The default, OpenStreetMap, needs no key; its credit must stay visible.</p>
+  </section>
+
+  <section id="device" hidden>
+    <h2>Device</h2>
+    <div class="row"><span>Firmware</span><span id="fw"></span></div>
+    <div class="row"><span>Restart</span><button data-post="/api/reboot" data-confirm="Restart the radar?">Restart</button></div>
+    <p class="hint" id="bootnote"></p>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
+const NAMES = {sweep:'Sweep', rings:'Range rings', labels:'Callsigns', altitude:'Altitude', trails:'Trails', fade:'Fade after sweep',
+  shapes:'Aircraft shapes', auto_cycle:'Cycle through aircraft', tag:'Tag box', tag_route:'Tag: route', tag_type:'Tag: type',
+  tag_level:'Tag: level', tag_speed:'Tag: speed', card:'Large card', map:'Map'};
+let cfg = {};
+
+function flash() { const s = $('#saved'); s.classList.add('on'); clearTimeout(flash.t); flash.t = setTimeout(() => s.classList.remove('on'), 900); }
+async function send(change) {
+  try {
+    const r = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(change)});
+    if (r.ok) { cfg = await r.json(); fill(); flash(); }
+  } catch (e) { $('#status').textContent = 'not reachable'; }
+}
+function fill() {
+  for (const el of $$('[data-k]')) {
+    const v = cfg[el.dataset.k];
+    if (v === undefined || el === document.activeElement) continue;
+    if (el.type === 'checkbox') el.checked = !!v; else el.value = String(v);
+  }
+  for (const el of $$('[data-show]')) el.textContent = cfg[el.dataset.show] + '%';
+  for (const el of $$('#toggles input')) el.checked = !!cfg[el.name];
+  if (document.activeElement !== $('#lat') && document.activeElement !== $('#lon') && cfg.home_set) { $('#lat').value = cfg.home_lat; $('#lon').value = cfg.home_lon; }
+  $('#homehint').textContent = cfg.home_set ? '' : 'No position set yet, so live aircraft cannot be shown. It is stored on the radar only.';
+}
+function build() {
+  for (const k of Object.keys(NAMES)) {
+    if (!(k in cfg)) continue;
+    const l = document.createElement('label'), c = document.createElement('input');
+    c.type = 'checkbox'; c.name = k; c.onchange = () => send({[k]: c.checked});
+    l.append(c, ' ' + NAMES[k]); $('#toggles').append(l);
+  }
+  for (const el of $$('[data-k]')) {
+    const k = el.dataset.k;
+    const read = () => el.type === 'checkbox' ? el.checked : 'bool' in el.dataset ? el.value === 'true'
+                     : (el.type === 'number' || el.type === 'range' || 'num' in el.dataset) ? Number(el.value) : el.value;
+    el.addEventListener('change', () => send({[k]: read()}));
+    if (el.type === 'range') el.addEventListener('input', () => { const s = $(`[data-show="${k}"]`); if (s) s.textContent = el.value + '%'; });
+  }
+  for (const b of $$('[data-post]')) b.onclick = async () => {
+    if (b.dataset.confirm && !confirm(b.dataset.confirm)) return;
+    await fetch(b.dataset.post, {method:'POST'}); setTimeout(load, 400);
+  };
+  $('#sethome').onclick = () => {
+    const lat = Number($('#lat').value), lon = Number($('#lon').value);
+    if ($('#lat').value === '' || $('#lon').value === '' || !(Math.abs(lat) <= 90) || !(Math.abs(lon) <= 180)) { $('#homehint').textContent = 'Enter a latitude (-90 to 90) and a longitude (-180 to 180).'; return; }
+    send({home_lat: lat, home_lon: lon, live: true});
+  };
+  $('#here').onclick = () => navigator.geolocation ? navigator.geolocation.getCurrentPosition(
+      p => { $('#lat').value = p.coords.latitude.toFixed(4); $('#lon').value = p.coords.longitude.toFixed(4); },
+      () => { $('#homehint').textContent = 'The browser would not give a location; type it in instead.'; })
+    : ($('#homehint').textContent = 'This browser cannot give a location; type it in instead.');
+}
+async function load() { try { cfg = await (await fetch('/api/settings')).json(); fill(); } catch (e) {} }
+async function status() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    const bits = [s.live ? (s.aircraft + ' aircraft' + (s.feed_age_s >= 0 ? ', updated ' + s.feed_age_s + ' s ago' : ', waiting for data')) : 'demo traffic'];
+    if (s.feed_error) bits.push(s.feed_error);
+    if (s.map_missing > 0) bits.push(s.map_missing + ' map tiles missing');
+    if (s.fps) bits.push(s.fps + ' frames a second');
+    $('#status').textContent = bits.join(' · ');
+    if (s.device) {
+      $('#device').hidden = false;
+      $('#fw').textContent = s.version + (s.confirmed ? '' : ' (on trial)');
+      $('#bootnote').textContent = s.confirmed ? '' : 'This firmware is on trial: a restart or power cycle returns to the previous firmware.';
+    }
+    if (s.range_km && document.activeElement !== $('[data-k="range_km"]')) $('[data-k="range_km"]').value = String(s.range_km);
+  } catch (e) { $('#status').textContent = 'not reachable'; }
+}
+(async () => { await load(); build(); fill(); status(); setInterval(status, 3000); })();
+</script>
+</html>

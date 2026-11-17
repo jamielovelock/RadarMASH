@@ -101,6 +101,14 @@ bool number(Span v, double &out) {
   return true;
 }
 
+bool boolean(Span v, bool &out) {
+  if (!v.ok()) return false;
+  size_t n = (size_t)(v.end - v.p);
+  if (n == 4 && memcmp(v.p, "true", 4) == 0) { out = true; return true; }
+  if (n == 5 && memcmp(v.p, "false", 5) == 0) { out = false; return true; }
+  return false;
+}
+
 // Western European accented letters, U+00C0..U+00FF, as their nearest plain letter. The screen font has no accents.
 static const char PLAIN[] = "AAAAAAACEEEEIIIIDNOOOOOxOUUUUYTsaaaaaaaceeeeiiiidnooooo/ouuuuyty";
 

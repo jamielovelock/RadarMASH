@@ -16,6 +16,7 @@ struct Live {
   int refresh_s = 5;
   bool include_ground = false;
   bool routes = true;
+  bool enabled = false;         // poll only while this is set (live mode)
 
   // status, for the page
   int last_count = -1;          // aircraft in the last good reply, or -1 before the first

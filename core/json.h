@@ -19,6 +19,7 @@ Span parse(const char *text, size_t len);                    // the top-level va
 bool member(Span object, const char *key, Span &out);        // object["key"]
 bool element(Span array, const char *&iter, Span &out);      // next array element; start with iter = nullptr
 bool number(Span v, double &out);
+bool boolean(Span v, bool &out);                             // true or false
 bool string(Span v, char *out, size_t out_size);             // unescaped, cut to fit, accents reduced to plain letters
 bool isObject(Span v);
 bool isArray(Span v);

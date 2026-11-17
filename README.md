@@ -4,7 +4,7 @@ Open firmware for the GeekMagic Radar 360 (model `radar21en`): a 2.1" round, 360
 around you. Named in honour of Radar O'Reilly, who always heard the choppers first.
 
 **Status: early development.** The simulator is the easy way to try it. The device firmware is a development build that
-boots and shows live aircraft over the map, but it has no saved settings and no Wi-Fi setup screen yet, and is not
+boots, shows live aircraft over the map and remembers its settings, but it has no Wi-Fi setup screen yet and is not
 ready for general use.
 
 ## Layout
@@ -15,6 +15,7 @@ ready for general use.
 | `sim/` | Desktop simulator: runs `core/` on your computer and shows the screen in a web browser, with demo or live aircraft. |
 | `tests/` | Unit tests for `core/`. |
 | `firmware/` | Device firmware (PlatformIO, Arduino for ESP32-S3). |
+| `web/` | The settings page, served by both the simulator and the device. |
 | `tools/` | Build helpers. |
 
 The firmware builds the same `core/` code as the simulator, so what you see in one is what the other draws.
@@ -25,7 +26,9 @@ You need a C++17 compiler and `make` (macOS or Linux), plus `curl` if you want t
 
     make -C sim run
 
-Then open http://localhost:8360. "Short press" and "Long press" stand in for the device's single button.
+Then open http://localhost:8360: the round screen, with the settings page underneath. It is the same page the device
+serves, so anything set up here works the same there. The simulator keeps its settings in
+`~/.config/radarmash/simulator.json`.
 
 To save one frame instead: `sim/radarmash-sim --shot frame.bmp --t 9000 --select 0`
 
@@ -71,7 +74,21 @@ replaced. The firmware is written around that:
 To build: copy `firmware/include/secrets.example.h` to `secrets.h`, fill in your Wi-Fi details, and run
 `firmware/build.sh` (needs PlatformIO). That produces `radarmash-radar21en.bin`, which the stock firmware's updater
 accepts: `curl -H 'Content-Type: application/octet-stream' --data-binary @radarmash-radar21en.bin http://DEVICE/api/ota`.
-Stock refuses uploads for about a minute after it boots. The device then serves a small control page.
+Stock refuses uploads for about a minute after it boots. The device then serves the settings page at its address.
+Settings, including where the radar is, are stored on the device only.
+
+## Settings
+
+One page (`web/admin.html`) sets everything: which features are shown, brightness, range, live or demo aircraft, where
+the radar is, the data source and refresh rate, and the map source, style and brightness. It talks JSON:
+
+    GET  /api/settings            everything, as one object
+    POST /api/settings            any subset, e.g. {"trails": false, "range_km": 80}
+    GET  /api/status              what the radar is doing
+    POST /api/press, /api/hold    the button
+
+Values out of range are clamped and anything unrecognised is ignored, so an old page and new firmware (or the reverse)
+get along.
 
 ## Tests
 

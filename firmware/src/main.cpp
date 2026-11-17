@@ -14,6 +14,7 @@
 #include <Arduino.h>
 #include <HTTPClient.h>
 #include <PNGdec.h>
+#include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -21,8 +22,11 @@
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <esp_psram.h>
+#include <esp_wifi.h>
 #include <mbedtls/sha256.h>
 
+#include "admin_html.h"
+#include "config.h"
 #include "feed.h"
 #include "panel_init.h"
 #include "radar.h"
@@ -222,7 +226,8 @@ static bool live_mode = false;
 static int refresh_s = 5;
 static int feed_count = -1, feed_errors = 0, feed_failing = 0, lookups = 0;
 static uint32_t feed_ok_ms = 0;
-static bool use_fi = true;                          // which of the two free feeds; swapped when one stops answering
+static String feed_url = FEED_ADSB_FI;              // swapped between the two built-in feeds when one stops answering
+static bool include_ground = false;
 static Aircraft *fresh = nullptr;                   // the feed task's working list (in PSRAM when there is some)
 
 struct RouteEntry { char callsign[9]; RouteInfo info; bool known; uint32_t when_ms; };
@@ -250,15 +255,19 @@ static bool httpsGet(const String &url, String &body) {
 static void pollFeed() {
   double lat, lon; int nm, limit;
   { Lock lock; lat = radar.home_lat; lon = radar.home_lon; nm = feedRadiusNm(radar.range_km); limit = constrain((int)radar.set.max_aircraft, 1, MAX_AIRCRAFT); }
-  String url = use_fi ? FEED_ADSB_FI : FEED_ADSB_LOL;
+  String url, url_before;
+  { Lock lock; url = url_before = feed_url; }
   url.replace("{lat}", String(lat, 4)); url.replace("{lon}", String(lon, 4)); url.replace("{nm}", String(nm));
   String body;
-  int n = httpsGet(url, body) ? parseAircraft(body.c_str(), body.length(), lat, lon, false, fresh, limit) : -1;
+  int n = httpsGet(url, body) ? parseAircraft(body.c_str(), body.length(), lat, lon, include_ground, fresh, limit) : -1;
   body = String();
   Lock lock;
   if (n < 0) {
     feed_errors++;
-    if (++feed_failing >= 2) { use_fi = !use_fi; feed_failing = 0; }
+    if (++feed_failing >= 2 && feed_url == url_before) {
+      if (feed_url == FEED_ADSB_FI) { feed_url = FEED_ADSB_LOL; feed_failing = 0; }
+      else if (feed_url == FEED_ADSB_LOL) { feed_url = FEED_ADSB_FI; feed_failing = 0; }
+    }
     return;
   }
   for (int i = 0; i < n; i++) {
@@ -477,6 +486,50 @@ static void hOtaDone() {
   if (ota.ok && !ota.dry) { delay(500); ESP.restart(); }
 }
 
+// ---- settings ----
+// One Config holds everything the settings page can change. It is saved as JSON in the device's key-value store (NVS),
+// under RadarMASH's own name, a few seconds after the last change so a dragged slider is one write, not fifty.
+static Config cfg;
+static Preferences prefs;
+static bool cfg_dirty = false;
+static uint32_t cfg_dirty_ms = 0;
+static uint32_t fps = 0;
+
+static void applyConfig() {                         // caller holds the lock (or nothing else is running yet)
+  bool was_live = live_mode, moved = radar.home_lat != cfg.home_lat || radar.home_lon != cfg.home_lon;
+  radar.set = cfg.set;
+  radar.home_lat = cfg.home_lat; radar.home_lon = cfg.home_lon;
+  radar.range_km = cfg.range_km;
+  refresh_s = cfg.refresh_s; include_ground = cfg.include_ground;
+  feed_url = cfg.feed_url;                          // (also undoes any automatic swap to the other feed)
+  map_url = cfg.map_url;
+  snprintf(map_credit, sizeof map_credit, "%s", cfg.map_credit);
+  snprintf(radar.map_credit, sizeof radar.map_credit, "%s", cfg.map_credit);
+  live_mode = cfg.wantsLive();
+  if (was_live != live_mode || moved) { radar.count = 0; radar.selected = -1; feed_count = -1; feed_ok_ms = 0; }   // a different sky
+  brightness = cfg.brightness * 1023 / 100;
+}
+static void markDirty() { cfg_dirty = true; cfg_dirty_ms = millis(); }
+
+static size_t currentConfigJson(char *buf, size_t n) {   // caller holds the lock
+  cfg.set = radar.set; cfg.range_km = radar.range_km;    // the button changes these behind the page's back
+  return configToJson(cfg, buf, n);
+}
+static void saveConfigIfDue() {
+  if (!cfg_dirty || millis() - cfg_dirty_ms < 3000) return;
+  char buf[CONFIG_JSON_MAX];
+  size_t n;
+  { Lock lock; n = currentConfigJson(buf, sizeof buf); }
+  if (n) prefs.putString("config", buf);
+  cfg_dirty = false;
+}
+static void loadConfig() {
+  prefs.begin("radarmash", false);
+  String saved = prefs.getString("config", "");
+  if (saved.length()) configFromJson(saved.c_str(), saved.length(), cfg);
+  applyConfig();
+}
+
 // ---- web ----
 static void touch() { last_activity_ms = millis(); }
 static void ok() { server.send(200, "text/plain", "ok"); }
@@ -489,68 +542,57 @@ static void hPerf() {
   perf_draw_us = perf_wait_us = perf_diff_us = perf_send_us = perf_sent_px = perf_frames = 0;
   server.send(200, "application/json", j);
 }
+
 // Reading the status does not count as someone using the device: a page left open polling it must not hold off the
-// return to the other firmware.
+// return to the other firmware. The first few fields are what the settings page shows; the rest is for diagnosis.
 static void hStatus() {
   const esp_partition_t *b = esp_ota_get_boot_partition();
+  wifi_config_t wc = {};
+  bool wifi_saved = esp_wifi_get_config(WIFI_IF_STA, &wc) == ESP_OK && wc.sta.ssid[0] != 0;
   Lock lock;
-  String j = "{\"fw\":\"radarmash\",\"version\":\"" FW_VERSION "\"";
+  String j = "{\"device\":true,\"version\":\"" FW_VERSION "\"";
+  j += ",\"confirmed\":" + String(confirmed() ? "true" : "false");
+  j += ",\"live\":" + String(live_mode ? "true" : "false") + ",\"aircraft\":" + String(radar.count);
+  j += ",\"feed_age_s\":" + String(feed_ok_ms ? (long)((millis() - feed_ok_ms) / 1000) : -1L) + ",\"feed_error\":\"\"";
+  j += ",\"map_missing\":" + String(map_missing < 0 ? 0 : map_missing) + ",\"range_km\":" + String((int)radar.range_km) + ",\"fps\":" + String(fps);
   j += ",\"running\":\"" + String(running_p->label) + "\",\"running_state\":" + String(runningState());
-  j += ",\"boot\":\"" + String(b ? b->label : "?") + "\",\"other\":\"" + String(other_p ? other_p->label : "none") + "\"";
-  j += ",\"confirmed\":" + String(confirmed() ? "true" : "false") + ",\"arm_err\":" + String((int)arm_err);
+  j += ",\"boot\":\"" + String(b ? b->label : "?") + "\",\"other\":\"" + String(other_p ? other_p->label : "none") + "\",\"arm_err\":" + String((int)arm_err);
   j += ",\"frame_ms\":" + String(frame_ms) + ",\"frames\":" + String(frames) + ",\"brightness\":" + String(brightness);
-  j += ",\"live\":" + String(live_mode ? "true" : "false") + ",\"feed\":\"" + String(use_fi ? "adsb.fi" : "adsb.lol") + "\"";
-  j += ",\"aircraft\":" + String(radar.count) + ",\"feed_count\":" + String(feed_count) + ",\"feed_errors\":" + String(feed_errors);
-  j += ",\"feed_age_ms\":" + String(feed_ok_ms ? (long)(millis() - feed_ok_ms) : -1L) + ",\"lookups\":" + String(lookups);
-  j += ",\"refresh_s\":" + String(refresh_s) + ",\"max_aircraft\":" + String((int)radar.set.max_aircraft) + ",\"range_km\":" + String((int)radar.range_km);
-  j += ",\"selected\":" + String(radar.selected);
+  j += ",\"feed_count\":" + String(feed_count) + ",\"feed_errors\":" + String(feed_errors) + ",\"lookups\":" + String(lookups);
+  j += ",\"home_set\":" + String(cfg.home_set ? "true" : "false") + ",\"wifi_saved\":" + String(wifi_saved ? "true" : "false");
+  j += ",\"map\":" + String(radar.map ? "true" : "false") + ",\"map_zoom\":" + String(map_front ? map_front->zoom : -1);
+  j += ",\"map_tiles\":" + String(map_tiles_fetched) + ",\"map_tile_failures\":" + String(map_tiles_failed) + ",\"map_decode_failures\":" + String(map_decode_failed);
+  j += ",\"panel_err\":" + String((int)panel_err) + ",\"cache\":" + String(radar.cache ? "true" : "false");
+  j += ",\"psram\":" + String(psramOk() ? "true" : "false") + ",\"psram_free\":" + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   j += ",\"reset_reason\":" + String((int)esp_reset_reason()) + ",\"uptime_ms\":" + String(millis());
-  j += ",\"map\":" + String(radar.map ? "true" : "false") + ",\"map_zoom\":" + String(map_front ? map_front->zoom : -1) + ",\"map_missing\":" + String(map_missing);
-  j += ",\"map_tiles\":" + String(map_tiles_fetched) + ",\"map_tile_failures\":" + String(map_tiles_failed) + ",\"map_decode_failures\":" + String(map_decode_failed) + ",\"map_style\":" + String((int)radar.set.map_style) + ",\"map_brightness\":" + String((int)radar.set.map_brightness);
-  j += ",\"panel_err\":" + String((int)panel_err);
-  j += ",\"cache\":" + String(radar.cache ? "true" : "false");
-  j += ",\"psram\":" + String(psramOk() ? "true" : "false") + ",\"psram_size\":" + String((unsigned)esp_psram_get_size());
-  j += ",\"psram_heap\":" + String((unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM)) + ",\"psram_free\":" + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   j += ",\"heap\":" + String(ESP.getFreeHeap()) + ",\"heap_min\":" + String(ESP.getMinFreeHeap()) + ",\"rssi\":" + String(WiFi.RSSI()) + "}";
   server.send(200, "application/json", j);
 }
-static void hSettings() {
-  Lock lock;
-  String j = "[";
-  for (int i = 0; i < TOGGLE_COUNT; i++) {
-    if (i) j += ",";
-    j += String("{\"name\":\"") + TOGGLES[i].name + "\",\"label\":\"" + TOGGLES[i].label + "\",\"on\":" + (radar.set.*TOGGLES[i].field ? "true" : "false") + "}";
-  }
-  server.send(200, "application/json", j + "]");
+
+static void hSettingsGet() {
+  char buf[CONFIG_JSON_MAX];
+  { Lock lock; currentConfigJson(buf, sizeof buf); }
+  server.send(200, "application/json", buf);
 }
-static void hToggle() {
-  touch(); Lock lock;
-  bool *f = toggleByName(radar.set, server.arg("name").c_str());
-  if (!f) { server.send(404, "text/plain", "no such switch"); return; }
-  *f = server.hasArg("on") ? server.arg("on") == "1" : !*f;
-  ok();
+static void hSettingsPost() {
+  touch();
+  String body = server.arg("plain");
+  char buf[CONFIG_JSON_MAX];
+  bool good;
+  {
+    Lock lock;
+    cfg.set = radar.set; cfg.range_km = radar.range_km;
+    good = configFromJson(body.c_str(), body.length(), cfg);
+    if (good) { applyConfig(); currentConfigJson(buf, sizeof buf); }
+  }
+  if (!good) { server.send(400, "application/json", "{\"error\":\"not JSON\"}"); return; }
+  setBacklight(brightness);
+  markDirty();
+  server.send(200, "application/json", buf);
 }
 static void hPress() { touch(); { Lock lock; radar.shortPress(); } ok(); }
-static void hHold() { touch(); { Lock lock; radar.longPress(); } ok(); }
-static void hBl() { touch(); setBacklight(server.arg("v").toInt()); ok(); }
-// Home position is held in memory only for now, so nothing about where the device lives is written to flash.
-static void hHome() {
-  touch();
-  double lat = server.arg("lat").toDouble(), lon = server.arg("lon").toDouble();
-  if (!server.hasArg("lat") || !server.hasArg("lon") || lat < -90 || lat > 90 || lon < -180 || lon > 180) { server.send(400, "text/plain", "lat=..&lon=.."); return; }
-  Lock lock;
-  radar.home_lat = lat; radar.home_lon = lon;
-  radar.count = 0; radar.selected = -1; feed_count = -1;
-  live_mode = true;
-  ok();
-}
-static void hDemo() { touch(); { Lock lock; live_mode = false; radar.count = 0; radar.selected = -1; } ok(); }
-static void hFeed() {
-  touch(); Lock lock;
-  if (server.hasArg("refresh")) refresh_s = constrain((int)server.arg("refresh").toInt(), 2, 300);
-  if (server.hasArg("max")) radar.set.max_aircraft = (uint8_t)constrain((int)server.arg("max").toInt(), 1, MAX_AIRCRAFT);
-  ok();
-}
+static void hHold() { touch(); { Lock lock; radar.longPress(); } markDirty(); ok(); }
+
 // Exercise the external memory chip: write a pattern across a block, read it back, and time both.
 static void hPsramTest() {
   touch();
@@ -568,43 +610,18 @@ static void hPsramTest() {
   server.send(200, "application/json", String("{\"found\":true,\"alloc\":true,\"bytes\":") + String(bytes) + ",\"bad_words\":" + String(bad) +
                                          ",\"write_ms\":" + String(t1 - t0) + ",\"read_ms\":" + String(t2 - t1) + "}");
 }
-// Map source, credit line, style (0 as is, 1 dark, 2 green) and brightness. Held in memory only for now.
-static void hMap() {
-  touch(); Lock lock;
-  if (server.hasArg("url") && (server.arg("url").startsWith("https://") || server.arg("url").startsWith("http://"))) map_url = server.arg("url");
-  if (server.hasArg("credit")) snprintf(map_credit, sizeof map_credit, "%s", server.arg("credit").c_str());
-  if (server.hasArg("style")) radar.set.map_style = (MapStyle)constrain((int)server.arg("style").toInt(), 0, (int)MapStyle::Count - 1);
-  if (server.hasArg("bright")) radar.set.map_brightness = (uint8_t)constrain((int)server.arg("bright").toInt(), 0, 100);
-  snprintf(radar.map_credit, sizeof radar.map_credit, "%s", map_credit);
-  ok();
-}
 static void hStay() { touch(); bool c = confirmSelf(); server.send(c ? 200 : 500, "text/plain", c ? "confirmed: this image now survives resets" : "confirm failed"); }
 static void hStock() {
   touch();
   esp_err_t e = otherHasApp() ? esp_ota_set_boot_partition(other_p) : ESP_FAIL;
   server.send(e == ESP_OK ? 200 : 500, "text/plain", String("next boot: ") + (e == ESP_OK ? other_p->label : "unchanged (other slot has no app)"));
 }
-static void hReboot() { server.send(200, "text/plain", "rebooting"); delay(300); ESP.restart(); }
-
-static const char UI[] PROGMEM = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>RadarMASH</title>
-<style>body{font:15px system-ui;max-width:36em;margin:1em auto;padding:0 1em}button{margin:.2em;padding:.5em .8em}label{display:inline-block;margin:.2em .6em .2em 0}pre{background:#eee;padding:.6em;overflow:auto}</style>
-<h3>RadarMASH <small id=v></small></h3>
-<p><button onclick="g('/press')">Short press</button><button onclick="g('/hold')">Long press</button>
- Backlight <button onclick="g('/bl?v=80')">dim</button><button onclick="g('/bl?v=400')">mid</button><button onclick="g('/bl?v=1023')">full</button></p>
-<p id=t></p>
-<p>Live aircraft: lat <input id=la size=8> lon <input id=lo size=8> <button onclick="g('/home?lat='+la.value+'&lon='+lo.value)">Go live</button><button onclick="g('/demo')">Demo</button><br>
- refresh <input id=rf size=3> s, show at most <input id=mx size=3> <button onclick="g('/feed?refresh='+rf.value+'&max='+mx.value)">Apply</button></p>
-<p>Map: style <select id=ms onchange="g('/map?style='+this.value)"><option value=0>As is<option value=1>Dark<option value=2>Green</select>
- brightness <input id=mb type=range min=0 max=100 onchange="g('/map?bright='+this.value)" style="vertical-align:middle"></p>
-<p>Boot: <button onclick="g('/stock')">next boot = other firmware</button><button onclick="g('/reboot')">reboot</button></p>
-<pre id=s></pre>
-<script>const $=i=>document.getElementById(i);let filled=0;
-function g(u){fetch(u).then(()=>setTimeout(s,300))}
-function s(){fetch('/status').then(r=>r.json()).then(j=>{$('s').textContent=JSON.stringify(j,null,1);$('v').textContent=j.version;if(!filled){filled=1;$('rf').value=j.refresh_s;$('mx').value=j.max_aircraft;$('ms').value=j.map_style;$('mb').value=j.map_brightness}})}
-fetch('/settings').then(r=>r.json()).then(a=>{for(const o of a){const l=document.createElement('label'),c=document.createElement('input');c.type='checkbox';c.checked=o.on;
-c.onchange=()=>fetch('/toggle?name='+o.name+'&on='+(c.checked?1:0));l.append(c,' '+o.label);$('t').append(l)}});
-s();setInterval(s,3000)</script>)HTML";
-static void hUi() { touch(); server.send_P(200, "text/html", UI); }
+static void hReboot() {
+  server.send(200, "text/plain", "rebooting");
+  cfg_dirty_ms = 0; saveConfigIfDue();                // do not lose a change made a moment ago
+  delay(300); ESP.restart();
+}
+static void hUi() { server.send_P(200, "text/html", ADMIN_HTML); }
 
 void setup() {
   running_p = esp_ota_get_running_partition();
@@ -613,6 +630,7 @@ void setup() {
   if (!confirmed() && otherHasApp()) arm_err = esp_ota_set_boot_partition(other_p);   // any reset from here goes back to the other slot
 
   radar_mu = xSemaphoreCreateMutex();
+  loadConfig();                                                // saved settings, before anything is drawn
   if (psramOk()) {                                             // with the external memory, keep the still background ready
     void *mem = heap_caps_malloc(sizeof(ScopeCache), MALLOC_CAP_SPIRAM);
     if (mem) radar.cache = new (mem) ScopeCache();
@@ -642,21 +660,18 @@ void setup() {
   boot_note[0] = 0;
 
   server.on("/", hUi);
-  server.on("/status", hStatus);
+  server.on("/api/status", hStatus);
+  server.on("/status", hStatus);                       // older name, kept for scripts
+  server.on("/api/settings", HTTP_GET, hSettingsGet);
+  server.on("/api/settings", HTTP_POST, hSettingsPost);
+  server.on("/api/press", HTTP_POST, hPress);
+  server.on("/api/hold", HTTP_POST, hHold);
+  server.on("/api/reboot", HTTP_POST, hReboot);
+  server.on("/reboot", hReboot);
   server.on("/perf", hPerf);
-  server.on("/settings", hSettings);
-  server.on("/toggle", hToggle);
-  server.on("/press", hPress);
-  server.on("/hold", hHold);
-  server.on("/bl", hBl);
-  server.on("/home", hHome);
-  server.on("/demo", hDemo);
-  server.on("/feed", hFeed);
-  server.on("/map", hMap);
   server.on("/psramtest", hPsramTest);
   server.on("/stay", hStay);
   server.on("/stock", hStock);
-  server.on("/reboot", hReboot);
   server.on("/ota", HTTP_POST, hOtaDone, hOtaRaw);
   server.on("/ota/dry", HTTP_POST, hOtaDone, hOtaDryRaw);
   server.begin();
@@ -677,14 +692,18 @@ void loop() {
     if (btn_down) { btn_down_ms = now; long_done = false; }
     else if (!long_done) { Lock lock; radar.shortPress(); }
   }
-  if (btn_down && !long_done && now - btn_down_ms > 700) { long_done = true; Lock lock; radar.longPress(); }
+  if (btn_down && !long_done && now - btn_down_ms > 700) { long_done = true; { Lock lock; radar.longPress(); } markDirty(); }
   if (btn_down && now - btn_down_ms > 8000) { snprintf(boot_note, sizeof boot_note, "back to other firmware"); drawFrame(!live_mode); delay(150); goHome(); }
 
   drawFrame(!live_mode);
 
-  static uint32_t checked_ms = 0;
+  static uint32_t checked_ms = 0, frames_then = 0;
   static bool is_confirmed = false;
-  if (now - checked_ms > 1000) { checked_ms = now; is_confirmed = confirmed(); }       // reads flash, so not every frame
+  if (now - checked_ms > 1000) {                                                      // once a second
+    fps = (frames - frames_then) * 1000 / (now - checked_ms); frames_then = frames;
+    checked_ms = now; is_confirmed = confirmed();                                     // reads flash, so not every frame
+    saveConfigIfDue();
+  }
   if (!is_confirmed && now - last_activity_ms > 30UL * 60UL * 1000UL) ESP.restart();   // unconfirmed and left alone: go back
   if (WiFi.status() == WL_CONNECTED) wifi_lost_ms = 0;
   else { if (!wifi_lost_ms) wifi_lost_ms = now | 1; if (now - wifi_lost_ms > 10UL * 60UL * 1000UL) ESP.restart(); }

@@ -108,7 +108,7 @@ private:
   mutable float kx_ = 0;
 };
 
-// Moving made-up traffic around a made-up home, for the simulator and for a demo mode on the device.
+// Moving made-up traffic around wherever home is, for the simulator and for a demo mode on the device.
 void demoTraffic(Radar &r, uint32_t now_ms);
 
 }  // namespace rm

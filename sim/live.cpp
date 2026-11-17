@@ -50,6 +50,9 @@ void Live::start(Radar *radar, std::mutex *mu, uint32_t (*clock_ms)()) {
 
 void Live::run() {
   for (;;) {
+    bool on;
+    { std::lock_guard<std::mutex> lock(*mu_); on = enabled; }
+    if (!on) { std::this_thread::sleep_for(std::chrono::milliseconds(300)); continue; }
     auto began = std::chrono::steady_clock::now();
     poll();
     int wait_s;

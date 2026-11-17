@@ -10,3 +10,4 @@ secrets.h
 .DS_Store
 .claude/
 build/
+admin_html.h

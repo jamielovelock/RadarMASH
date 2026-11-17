@@ -548,7 +548,6 @@ static void demoAt(const DemoFlight &d, float s, float &e, float &n, float &trac
 }
 
 void demoTraffic(Radar &r, uint32_t now_ms) {
-  r.home_lat = 51.0; r.home_lon = -1.0;                          // nowhere in particular
   const float loop_km = 110.0f;                                  // each flight repeats after this distance
   const float trail_step_km = 1.2f;
   const double km_per_deg_lon = 111.32 * cos(r.home_lat * 3.14159265358979 / 180.0);
