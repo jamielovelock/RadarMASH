@@ -399,8 +399,8 @@ TEST(labels_do_not_hop_about) {
   }
   // an update from the feed keeps the places too
   std::vector<Aircraft> next(r->ac, r->ac + r->count);
-  for (int i = 0; i < 4; i++) snprintf(next[i].hex, sizeof next[i].hex, "h%d", i);
-  for (int i = 0; i < 4; i++) snprintf(r->ac[i].hex, sizeof r->ac[i].hex, "h%d", i);
+  for (int i = 0; i < 4; i++) snprintf(next[i].hex, sizeof next[i].hex, "h%u", (unsigned)i & 7u);
+  for (int i = 0; i < 4; i++) snprintf(r->ac[i].hex, sizeof r->ac[i].hex, "h%u", (unsigned)i & 7u);
   r->update(next.data(), 4, 100);
   for (int i = 0; i < 4; i++) CHECK(r->ac[i].label_slot == before[i]);
 }
@@ -417,7 +417,7 @@ TEST(labels_keep_clear_of_the_tag_box) {
   CHECK(whole == renderInBands(*r, 40));
   CHECK(whole == renderInBands(*r, 7));
   // with a full sky in a small space something has to give, but it must still draw the same in strips
-  for (int i = 4; i < 30; i++) { char cs[9]; snprintf(cs, sizeof cs, "PACK%d", i); place(*r, i, cs, (i % 6) * 1.2 - 3, (i / 6) * 1.2 - 3); }
+  for (int i = 4; i < 30; i++) { char cs[9]; snprintf(cs, sizeof cs, "PACK%u", (unsigned)i % 100u); place(*r, i, cs, (i % 6) * 1.2 - 3, (i / 6) * 1.2 - 3); }
   r->tick(2);
   whole = renderWhole(*r);
   CHECK(whole == renderInBands(*r, 40));
