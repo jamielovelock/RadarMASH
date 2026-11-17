@@ -127,15 +127,26 @@ void Canvas::triangle(float ax, float ay, float bx, float by, float cx, float cy
 int Canvas::textWidth(const char *s, int scale) { return *s ? (int)strlen(s) * 6 * scale - scale : 0; }
 
 void Canvas::text(int x, int y, const char *s, int scale, Color c) {
-  if (y + 8 * scale <= y0 || y >= y0 + rows) return;
+  if (scale < 1 || y + 8 * scale <= y0 || y >= y0 + rows) return;
+  // Work out once which of the glyph's eight rows fall in this strip, then write pixels straight into the buffer.
   for (; *s; s++, x += 6 * scale) {
+    if (x + 5 * scale <= 0 || x >= SCREEN_W) continue;
     const uint8_t *g = FONT5X7 + (uint8_t)*s * 5;
-    for (int col = 0; col < 5; col++)
-      for (int bit = 0; bit < 8; bit++)
-        if (g[col] & (1 << bit)) {
-          if (scale == 1) pixel(x + col, y + bit, c);
-          else rect(x + col * scale, y + bit * scale, scale, scale, c);
+    for (int bit = 0; bit < 8; bit++) {
+      uint8_t mask = (uint8_t)(1 << bit);
+      if (!((g[0] | g[1] | g[2] | g[3] | g[4]) & mask)) continue;
+      for (int sy = 0; sy < scale; sy++) {
+        int py = y + bit * scale + sy;
+        if (!hasRow(py)) continue;
+        uint16_t *r = row(py);
+        for (int col = 0; col < 5; col++) {
+          if (!(g[col] & mask)) continue;
+          int px = x + col * scale;
+          for (int sx = 0; sx < scale; sx++, px++)
+            if (px >= 0 && px < SCREEN_W) r[px] = c;
         }
+      }
+    }
   }
 }
 

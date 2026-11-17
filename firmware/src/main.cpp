@@ -14,10 +14,10 @@
 #include <Arduino.h>
 #include <HTTPClient.h>
 #include <PNGdec.h>
-#include <SPI.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <driver/spi_master.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <esp_psram.h>
@@ -56,41 +56,119 @@ static char boot_note[40] = "";
 static bool psramOk() { return esp_psram_is_initialized() && heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0; }
 
 // ---- panel ----
-static uint16_t band[SCREEN_W * BAND_ROWS];        // one strip of the picture, upright
-static uint16_t turned[SCREEN_W * BAND_ROWS];      // the same strip as the panel wants it
+// Drawing and sending run side by side on the two processor cores: the main loop draws a strip into one of two buffers
+// and hands it over; the sender task works out what changed, turns it for the panel and clocks it out over SPI while the
+// loop is already drawing the next strip.
+// Word-aligned: the checksum reads the strips a word at a time, and the SPI driver's DMA wants an aligned buffer.
+static uint16_t strips[2][SCREEN_W * BAND_ROWS] __attribute__((aligned(4)));   // upright strips of the picture
+static uint16_t turned[SCREEN_W * BAND_ROWS] __attribute__((aligned(4)));      // a block as the panel wants it (sender task only)
+struct StripJob { uint8_t buf; int16_t y0; bool last; };
+static QueueHandle_t free_q, work_q;
+
+// The panel is driven through the ESP-IDF SPI driver with DMA, which clocks a whole block out at the full 80 MHz. (The
+// Arduino SPI class feeds the hardware 64 bytes at a time and manages a little over half that.)
+static spi_device_handle_t panel = nullptr;
+static esp_err_t panel_err = ESP_OK;
+
+static void spiOut(const uint8_t *data, size_t n) {
+  if (!panel || !n) return;
+  spi_transaction_t t = {};
+  t.length = n * 8;
+  if (n <= 4) { t.flags = SPI_TRANS_USE_TXDATA; memcpy(t.tx_data, data, n); }
+  else t.tx_buffer = data;                                  // must be DMA-capable memory: the static buffers are
+  esp_err_t e = spi_device_polling_transmit(panel, &t);
+  if (e != ESP_OK) panel_err = e;
+}
 
 static void panelCmd(uint8_t cmd, const uint8_t *data, size_t n) {
-  digitalWrite(PIN_DC, LOW); SPI.write(cmd);
+  digitalWrite(PIN_DC, LOW); spiOut(&cmd, 1);
   digitalWrite(PIN_DC, HIGH);
-  if (n) SPI.writeBytes(data, n);
+  if (n) spiOut(data, n);
 }
 
 static void panelInit() {
   pinMode(PIN_DC, OUTPUT); digitalWrite(PIN_DC, HIGH);
   pinMode(PIN_RST, OUTPUT); digitalWrite(PIN_RST, HIGH); delay(5);
   digitalWrite(PIN_RST, LOW); delay(10); digitalWrite(PIN_RST, HIGH); delay(120);
-  SPI.begin(PIN_SCLK, -1, PIN_MOSI, -1);
+  if (!panel) {
+    spi_bus_config_t bus = {};
+    bus.mosi_io_num = PIN_MOSI; bus.miso_io_num = -1; bus.sclk_io_num = PIN_SCLK; bus.quadwp_io_num = -1; bus.quadhd_io_num = -1;
+    bus.max_transfer_sz = SCREEN_W * BAND_ROWS * 2;
+    panel_err = spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO);
+    spi_device_interface_config_t dev = {};
+    dev.clock_speed_hz = SPI_HZ; dev.mode = 0; dev.spics_io_num = -1; dev.queue_size = 1; dev.flags = SPI_DEVICE_NO_DUMMY;
+    if (panel_err == ESP_OK) panel_err = spi_bus_add_device(SPI2_HOST, &dev, &panel);
+    if (panel_err == ESP_OK) panel_err = spi_device_acquire_bus(panel, portMAX_DELAY);   // the only device: keep the bus
+  }
   const uint8_t *p = PANEL_INIT;
   for (uint16_t i = 0; i < PANEL_INIT_COUNT; i++) {
-    SPI.beginTransaction(SPISettings(SPI_HZ, MSBFIRST, SPI_MODE0));
     panelCmd(p[0], p + 3, p[2]);
-    SPI.endTransaction();
     if (p[1]) delay(p[1]);
     p += 3 + p[2];
   }
 }
 
-// The panel is mounted a quarter turn round: upright (x, y) is panel column 359 - y, panel row x. So an upright strip of
-// rows becomes a block of panel columns, sent row by row, most-significant byte first.
-static void pushBand(int y0) {
+// The panel is mounted a quarter turn round: upright (x, y) is panel column 359 - y, panel row x. So an upright block of
+// rows and columns becomes a block of panel columns and rows, sent row by row, most-significant byte first.
+static void pushBlock(const uint16_t *band, int y0, int x0, int x1) {   // columns x0..x1 of the strip starting at row y0
   int n = 0;
-  for (int x = 0; x < SCREEN_W; x++)
+  for (int x = x0; x <= x1; x++)
     for (int y = BAND_ROWS - 1; y >= 0; y--) turned[n++] = __builtin_bswap16(band[y * SCREEN_W + x]);
   int c0 = SCREEN_H - BAND_ROWS - y0, c1 = SCREEN_H - 1 - y0;
   uint8_t cols[4] = {(uint8_t)(c0 >> 8), (uint8_t)c0, (uint8_t)(c1 >> 8), (uint8_t)c1};
-  uint8_t rows[4] = {0, 0, (uint8_t)((SCREEN_W - 1) >> 8), (uint8_t)(SCREEN_W - 1)};
+  uint8_t rows[4] = {(uint8_t)(x0 >> 8), (uint8_t)x0, (uint8_t)(x1 >> 8), (uint8_t)x1};
   panelCmd(0x2A, cols, 4); panelCmd(0x2B, rows, 4); panelCmd(0x2C, nullptr, 0);
-  SPI.writeBytes((const uint8_t *)turned, sizeof turned);
+  spiOut((const uint8_t *)turned, (size_t)n * 2);
+}
+
+// Only the parts of the screen that changed are sent: most of it is the same from one frame to the next, and sending
+// all 259 KB every time is what would limit the frame rate. The screen is divided into cells and a checksum of what each
+// one last showed is remembered; a cell is sent when its checksum changes. (Comparing against a full copy of the last
+// frame also works, but reading that copy back from PSRAM cost more than the sending it saved.)
+static const int CELL = 20;                               // cells are CELL wide and one strip tall
+static uint32_t cell_sum[SCREEN_H / BAND_ROWS][SCREEN_W / CELL];
+static bool send_all = true;
+static uint32_t perf_draw_us = 0, perf_wait_us = 0, perf_diff_us = 0, perf_send_us = 0, perf_sent_px = 0, perf_frames = 0;
+
+static void pushBand(const uint16_t *band, int y0) {
+  uint32_t t = micros();
+  uint32_t *sums = cell_sum[y0 / BAND_ROWS];
+  bool dirty[SCREEN_W / CELL];
+  for (int cx = 0; cx < SCREEN_W / CELL; cx++) {
+    uint32_t h = 2166136261u;
+    for (int y = 0; y < BAND_ROWS; y++) {
+      const uint32_t *w = (const uint32_t *)(band + y * SCREEN_W + cx * CELL);   // CELL pixels are CELL / 2 words
+      for (int i = 0; i < CELL / 2; i++) h = (h ^ w[i]) * 0x9E3779B1u;
+    }
+    dirty[cx] = send_all || h != sums[cx];
+    sums[cx] = h;
+  }
+  perf_diff_us += micros() - t;
+  t = micros();
+  for (int cx = 0; cx < SCREEN_W / CELL;) {                // send each run of changed cells as one block
+    if (!dirty[cx]) { cx++; continue; }
+    int end = cx;
+    while (end + 1 < SCREEN_W / CELL && dirty[end + 1]) end++;
+    pushBlock(band, y0, cx * CELL, (end + 1) * CELL - 1);
+    perf_sent_px += (end - cx + 1) * CELL * BAND_ROWS;
+    cx = end + 1;
+  }
+  perf_send_us += micros() - t;
+}
+
+static void senderTask(void *) {
+  StripJob job;
+  for (;;) {
+    xQueueReceive(work_q, &job, portMAX_DELAY);
+    pushBand(strips[job.buf], job.y0);
+    xQueueSend(free_q, &job.buf, portMAX_DELAY);
+    if (job.last) {
+      send_all = false;                                    // the whole screen has now been sent at least once
+      // The loop feeds this task as fast as it can take it, so without a pause it would never stop running, the idle
+      // task on this core would starve, and the watchdog would reset the device. Give way briefly once a frame.
+      vTaskDelay(pdMS_TO_TICKS(2));
+    }
+  }
 }
 
 static void setBacklight(int v) {                  // 0..1023. The pin is active low.
@@ -99,20 +177,27 @@ static void setBacklight(int v) {                  // 0..1023. The pin is active
 }
 
 static void drawFrame(bool demo) {
+  static uint32_t last_start = 0;
   uint32_t t0 = millis();
+  frame_ms = t0 - last_start; last_start = t0;             // time from one frame to the next, sending included
   Lock lock;
   if (demo) demoTraffic(radar, t0);
   radar.tick(t0);
   radar.prepare();
-  SPI.beginTransaction(SPISettings(SPI_HZ, MSBFIRST, SPI_MODE0));
   for (int y0 = 0; y0 < SCREEN_H; y0 += BAND_ROWS) {
-    Canvas c(band, y0, BAND_ROWS);
+    uint8_t buf;
+    uint32_t w = micros();
+    xQueueReceive(free_q, &buf, portMAX_DELAY);            // waits here only if the sender is behind
+    perf_wait_us += micros() - w;
+    uint32_t t = micros();
+    Canvas c(strips[buf], y0, BAND_ROWS);
     radar.draw(c);
     if (boot_note[0]) c.textCentred(180, 300, boot_note, 2, rgb(255, 240, 80));
-    pushBand(y0);
+    perf_draw_us += micros() - t;
+    StripJob job{buf, (int16_t)y0, y0 + BAND_ROWS >= SCREEN_H};
+    xQueueSend(work_q, &job, portMAX_DELAY);
   }
-  SPI.endTransaction();
-  frame_ms = millis() - t0; frames++;
+  frames++; perf_frames++;
 }
 
 // ---- which firmware boots ----
@@ -138,7 +223,7 @@ static int refresh_s = 5;
 static int feed_count = -1, feed_errors = 0, feed_failing = 0, lookups = 0;
 static uint32_t feed_ok_ms = 0;
 static bool use_fi = true;                          // which of the two free feeds; swapped when one stops answering
-static Aircraft fresh[MAX_AIRCRAFT];
+static Aircraft *fresh = nullptr;                   // the feed task's working list (in PSRAM when there is some)
 
 struct RouteEntry { char callsign[9]; RouteInfo info; bool known; uint32_t when_ms; };
 static RouteEntry route_cache[48];
@@ -323,10 +408,12 @@ static void updateMap() {
 }
 
 static void feedTask(void *) {
+  fresh = (Aircraft *)heap_caps_malloc(sizeof(Aircraft) * MAX_AIRCRAFT, psramOk() ? MALLOC_CAP_SPIRAM : MALLOC_CAP_DEFAULT);
+  for (int i = 0; fresh && i < MAX_AIRCRAFT; i++) new (&fresh[i]) Aircraft();
   for (;;) {
     uint32_t began = millis();
     if (WiFi.status() == WL_CONNECTED) updateMap();
-    if (live_mode && WiFi.status() == WL_CONNECTED) { pollFeed(); lookupOneRoute(); }
+    if (fresh && live_mode && WiFi.status() == WL_CONNECTED) { pollFeed(); lookupOneRoute(); }
     uint32_t every = (uint32_t)constrain(refresh_s, 2, 300) * 1000UL, took = millis() - began;
     vTaskDelay(pdMS_TO_TICKS(took < every ? every - took : 200));
   }
@@ -394,8 +481,17 @@ static void hOtaDone() {
 static void touch() { last_activity_ms = millis(); }
 static void ok() { server.send(200, "text/plain", "ok"); }
 
+// Timings averaged since the last call: where a frame's time goes, and how much of the screen is being sent.
+static void hPerf() {
+  uint32_t n = perf_frames ? perf_frames : 1;
+  String j = String("{\"frames\":") + String(perf_frames) + ",\"draw_us\":" + String(perf_draw_us / n) + ",\"wait_us\":" + String(perf_wait_us / n) + ",\"diff_us\":" + String(perf_diff_us / n) +
+             ",\"send_us\":" + String(perf_send_us / n) + ",\"sent_percent\":" + String(perf_sent_px / n * 100 / (SCREEN_W * SCREEN_H)) + ",\"frame_ms\":" + String(frame_ms) + "}";
+  perf_draw_us = perf_wait_us = perf_diff_us = perf_send_us = perf_sent_px = perf_frames = 0;
+  server.send(200, "application/json", j);
+}
+// Reading the status does not count as someone using the device: a page left open polling it must not hold off the
+// return to the other firmware.
 static void hStatus() {
-  touch();
   const esp_partition_t *b = esp_ota_get_boot_partition();
   Lock lock;
   String j = "{\"fw\":\"radarmash\",\"version\":\"" FW_VERSION "\"";
@@ -411,6 +507,7 @@ static void hStatus() {
   j += ",\"reset_reason\":" + String((int)esp_reset_reason()) + ",\"uptime_ms\":" + String(millis());
   j += ",\"map\":" + String(radar.map ? "true" : "false") + ",\"map_zoom\":" + String(map_front ? map_front->zoom : -1) + ",\"map_missing\":" + String(map_missing);
   j += ",\"map_tiles\":" + String(map_tiles_fetched) + ",\"map_tile_failures\":" + String(map_tiles_failed) + ",\"map_decode_failures\":" + String(map_decode_failed) + ",\"map_style\":" + String((int)radar.set.map_style) + ",\"map_brightness\":" + String((int)radar.set.map_brightness);
+  j += ",\"panel_err\":" + String((int)panel_err);
   j += ",\"cache\":" + String(radar.cache ? "true" : "false");
   j += ",\"psram\":" + String(psramOk() ? "true" : "false") + ",\"psram_size\":" + String((unsigned)esp_psram_get_size());
   j += ",\"psram_heap\":" + String((unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM)) + ",\"psram_free\":" + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -418,7 +515,7 @@ static void hStatus() {
   server.send(200, "application/json", j);
 }
 static void hSettings() {
-  touch(); Lock lock;
+  Lock lock;
   String j = "[";
   for (int i = 0; i < TOGGLE_COUNT; i++) {
     if (i) j += ",";
@@ -528,6 +625,9 @@ void setup() {
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
   panelInit();
+  free_q = xQueueCreate(2, sizeof(uint8_t)); work_q = xQueueCreate(2, sizeof(StripJob));
+  for (uint8_t i = 0; i < 2; i++) xQueueSend(free_q, &i, 0);
+  xTaskCreatePinnedToCore(senderTask, "send", 4096, nullptr, 1, nullptr, 0);   // same priority as the feed task, so they share the core
   snprintf(boot_note, sizeof boot_note, "joining Wi-Fi");
   drawFrame(true);
   ledcAttach(PIN_BL, 20000, 10); setBacklight(brightness);   // the light is off until driven: nothing else turns it on after a cold start
@@ -536,13 +636,14 @@ void setup() {
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 45000) drawFrame(true);
   if (WiFi.status() != WL_CONNECTED) {
     snprintf(boot_note, sizeof boot_note, "Wi-Fi failed");
-    drawFrame(true); delay(3000);
+    drawFrame(true); drawFrame(true); delay(3000);
     ESP.restart();                                           // unconfirmed: back to the other slot. Confirmed: try again.
   }
   boot_note[0] = 0;
 
   server.on("/", hUi);
   server.on("/status", hStatus);
+  server.on("/perf", hPerf);
   server.on("/settings", hSettings);
   server.on("/toggle", hToggle);
   server.on("/press", hPress);
@@ -577,11 +678,14 @@ void loop() {
     else if (!long_done) { Lock lock; radar.shortPress(); }
   }
   if (btn_down && !long_done && now - btn_down_ms > 700) { long_done = true; Lock lock; radar.longPress(); }
-  if (btn_down && now - btn_down_ms > 8000) { snprintf(boot_note, sizeof boot_note, "back to other firmware"); drawFrame(!live_mode); goHome(); }
+  if (btn_down && now - btn_down_ms > 8000) { snprintf(boot_note, sizeof boot_note, "back to other firmware"); drawFrame(!live_mode); delay(150); goHome(); }
 
   drawFrame(!live_mode);
 
-  if (!confirmed() && now - last_activity_ms > 30UL * 60UL * 1000UL) ESP.restart();   // unconfirmed and left alone: go back
+  static uint32_t checked_ms = 0;
+  static bool is_confirmed = false;
+  if (now - checked_ms > 1000) { checked_ms = now; is_confirmed = confirmed(); }       // reads flash, so not every frame
+  if (!is_confirmed && now - last_activity_ms > 30UL * 60UL * 1000UL) ESP.restart();   // unconfirmed and left alone: go back
   if (WiFi.status() == WL_CONNECTED) wifi_lost_ms = 0;
   else { if (!wifi_lost_ms) wifi_lost_ms = now | 1; if (now - wifi_lost_ms > 10UL * 60UL * 1000UL) ESP.restart(); }
 }

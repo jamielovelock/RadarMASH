@@ -101,6 +101,11 @@ struct Radar {
 
   void toScreen(double lat, double lon, float &x, float &y) const;
   bool project(const Aircraft &a, float &x, float &y) const;   // false if outside the outer ring
+
+private:
+  // kilometres per degree of longitude at home, remembered so the cosine is not recomputed for every point drawn
+  mutable double kx_for_lat_ = 1e9;
+  mutable float kx_ = 0;
 };
 
 // Moving made-up traffic around a made-up home, for the simulator and for a demo mode on the device.

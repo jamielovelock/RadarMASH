@@ -114,8 +114,9 @@ void Radar::tick(uint32_t t) {
 
 void Radar::toScreen(double lat, double lon, float &x, float &y) const {
   // flat-earth approximation around home; fine at radar ranges
-  float east_km = (float)((lon - home_lon) * 111.32 * cos(home_lat * 3.14159265358979 / 180.0));
-  float north_km = (float)((lat - home_lat) * 110.57);
+  if (home_lat != kx_for_lat_) { kx_ = (float)(111.32 * cos(home_lat * 3.14159265358979 / 180.0)); kx_for_lat_ = home_lat; }
+  float east_km = (float)(lon - home_lon) * kx_;                  // subtract at full precision, then the rest in fast float
+  float north_km = (float)(lat - home_lat) * 110.57f;
   float k = RADAR_RADIUS / range_km;
   x = CENTRE + east_km * k;
   y = CENTRE - north_km * k;
@@ -241,14 +242,28 @@ static void drawScopeCached(Canvas &c, const ScopeCache &cache, bool sweep, floa
   const uint8_t *trail = trailTable();
   const uint16_t sweep16 = (uint16_t)(int)(sweep_deg * (65536.0f / 360.0f));
   const float outer2 = (RADAR_RADIUS + 1.0f) * (RADAR_RADIUS + 1.0f);
+  // unit vectors along the sweep (b) and along the far end of its trail (a)
+  const float b_rad = sweep_deg * PI_F / 180.0f, a_rad = (sweep_deg - TRAIL_DEG) * PI_F / 180.0f;
+  const float b_x = sinf(b_rad), b_y = -cosf(b_rad), a_x = sinf(a_rad), a_y = -cosf(a_rad);
   for (int y = c.y0; y < c.y0 + c.rows; y++) {
     uint16_t *row = c.row(y);
     memcpy(row, cache.bg + y * SCREEN_W, SCREEN_W * sizeof(uint16_t));
     if (!sweep) continue;
     float dy = y - CENTRE, half2 = outer2 - dy * dy;
     if (half2 <= 0) continue;
-    int half = (int)sqrtf(half2);                                  // only the part of this row inside the glass
-    int x0 = (int)CENTRE - half, x1 = (int)CENTRE + 1 + half;
+    float half = sqrtf(half2);                                     // only the part of this row inside the glass...
+    float lo = -half, hi = half;                                   // ...as offsets from the centre column
+    // ...and inside the trail's wedge. The wedge is where two straight edges both hold, and along one row each edge
+    // is a single cut-off in x. So most of the row is skipped without looking at it.
+    bool none = false;
+    for (int e = 0; e < 2; e++) {
+      float k = e ? -a_y : b_y, m = e ? -a_x * dy : b_x * dy;      // the edge is k * dx >= m
+      if (k > 1e-4f) { float v = m / k; if (v > lo) lo = v; }
+      else if (k < -1e-4f) { float v = m / k; if (v < hi) hi = v; }
+      else if (m > 0) none = true;
+    }
+    if (none || lo > hi) continue;
+    int x0 = (int)(CENTRE + lo) - 1, x1 = (int)(CENTRE + hi) + 2;   // a pixel of slack; the table below has the last word
     if (x0 < 0) x0 = 0;
     if (x1 > SCREEN_W - 1) x1 = SCREEN_W - 1;
     const uint16_t *bearing = cache.bearing + y * SCREEN_W;
@@ -292,12 +307,67 @@ static const Tri SHAPE_ARROW[] = {                      // plain arrowhead, when
   {0, -1.0f, -0.62f, 0.62f, 0.62f, 0.62f},
 };
 
+// Silhouettes are drawn once into small coverage masks and reused, because filling triangles with soft edges for every
+// aircraft on every frame is slow on the device. A mask is kept per shape, size and heading (in 2 degree steps).
+static const int ICON = 32;                               // masks are ICON x ICON, centred on the aircraft
+struct IconMask { const Tri *tris; uint8_t size, heading; uint32_t used; uint8_t a[ICON * ICON]; };
+static IconMask icon_masks[12];
+static uint32_t icon_clock = 0;
+
+static void fillMask(IconMask &m, const Tri *t, int n, float size, float track_deg) {
+  memset(m.a, 0, sizeof m.a);
+  const float ang = track_deg * PI_F / 180.0f, co = cosf(ang) * size, si = sinf(ang) * size, mid = ICON / 2;
+  static const float off[2] = {0.25f, 0.75f};
+  for (int i = 0; i < n; i++) {
+    float ax = mid + t[i].ax * co - t[i].ay * si, ay = mid + t[i].ax * si + t[i].ay * co;
+    float bx = mid + t[i].bx * co - t[i].by * si, by = mid + t[i].bx * si + t[i].by * co;
+    float cx = mid + t[i].cx * co - t[i].cy * si, cy = mid + t[i].cx * si + t[i].cy * co;
+    float area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    if (fabsf(area) < 1e-6f) continue;
+    float s = area < 0 ? -1.0f : 1.0f;
+    int x0 = (int)floorf(fminf(ax, fminf(bx, cx))), x1 = (int)ceilf(fmaxf(ax, fmaxf(bx, cx)));
+    int y0 = (int)floorf(fminf(ay, fminf(by, cy))), y1 = (int)ceilf(fmaxf(ay, fmaxf(by, cy)));
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > ICON - 1) x1 = ICON - 1;
+    if (y1 > ICON - 1) y1 = ICON - 1;
+    for (int y = y0; y <= y1; y++)
+      for (int x = x0; x <= x1; x++) {
+        int hit = 0;                                      // 2x2 samples per pixel give the soft edge
+        for (int j = 0; j < 2; j++)
+          for (int k = 0; k < 2; k++) {
+            float qx = x + off[k] - 0.5f, qy = y + off[j] - 0.5f;
+            if (s * ((bx - ax) * (qy - ay) - (by - ay) * (qx - ax)) >= 0 && s * ((cx - bx) * (qy - by) - (cy - by) * (qx - bx)) >= 0 &&
+                s * ((ax - cx) * (qy - cy) - (ay - cy) * (qx - cx)) >= 0) hit++;
+          }
+        int a = hit * 255 / 4;
+        if (a > m.a[y * ICON + x]) m.a[y * ICON + x] = (uint8_t)a;   // triangles overlap: keep the most covered
+      }
+  }
+}
+
 static void drawTris(Canvas &c, const Tri *t, int n, float x, float y, float track_deg, float size, Color col) {
-  float a = track_deg * PI_F / 180.0f, co = cosf(a) * size, si = sinf(a) * size;
-  for (int i = 0; i < n; i++)
-    c.triangle(x + t[i].ax * co - t[i].ay * si, y + t[i].ax * si + t[i].ay * co,
-               x + t[i].bx * co - t[i].by * si, y + t[i].bx * si + t[i].by * co,
-               x + t[i].cx * co - t[i].cy * si, y + t[i].cx * si + t[i].cy * co, col);
+  int ix = (int)lroundf(x) - ICON / 2, iy = (int)lroundf(y) - ICON / 2;
+  if (iy >= c.y0 + c.rows || iy + ICON <= c.y0) return;   // not in this strip
+  uint8_t heading = (uint8_t)(((int)lroundf(track_deg / 2.0f) % 180 + 180) % 180);
+  IconMask *m = nullptr, *oldest = &icon_masks[0];
+  for (IconMask &e : icon_masks) {
+    if (e.tris == t && e.size == (uint8_t)size && e.heading == heading) { m = &e; break; }
+    if (e.used < oldest->used) oldest = &e;
+  }
+  if (!m) {
+    m = oldest;
+    m->tris = t; m->size = (uint8_t)size; m->heading = heading;
+    fillMask(*m, t, n, size, heading * 2.0f);
+  }
+  m->used = ++icon_clock;
+  for (int my = 0; my < ICON; my++) {
+    int py = iy + my;
+    if (!c.hasRow(py)) continue;
+    const uint8_t *a = m->a + my * ICON;
+    for (int mx = 0; mx < ICON; mx++)
+      if (a[mx]) c.blend(ix + mx, py, col, a[mx]);
+  }
 }
 #define TRIS(s) s, (int)(sizeof(s) / sizeof(s[0]))
 
@@ -383,6 +453,9 @@ static void drawAircraft(Canvas &c, const Radar &r, const Aircraft &a, float x, 
     col = dim(col, f); label = dim(label, f); level = dim(level, f);
   }
   if (set.trails) drawTrail(c, r, a, x, y, col);
+  // The icon, label and tag box all sit within this many rows of the aircraft. Outside that, this strip has nothing
+  // more of this aircraft, so skip the formatting and drawing (which adds up over nine strips and a full sky).
+  if (y + 90 < c.y0 || y - 90 >= c.y0 + c.rows) return;
   drawIcon(c, set.shapes ? a.shape : Shape::Unknown, x, y, a.track_deg, col);
   if (sel) c.ring(x, y, 17, COL_SEL);
   if (sel && set.tag) { drawTag(c, set, a, x, y); return; }
