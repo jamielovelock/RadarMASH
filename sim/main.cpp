@@ -295,7 +295,7 @@ int main(int argc, char **argv) {
   }
   if (want_live && shot) { fprintf(stderr, "--live cannot be used with --shot\n"); return 2; }
   const char *ua = getenv("RADARMASH_UA");
-  tiles.user_agent = live.user_agent = logos.user_agent = ua && *ua ? ua : "RadarMASH-simulator/0.1";
+  tiles.user_agent = live.user_agent = logos.user_agent = ua && *ua ? ua : "RadarMASH-simulator/0.2 (+https://github.com/jamielovelock/RadarMASH)";
 
   if (!shot) { save_settings = true; loadConfig(); }      // a still frame always starts from the defaults
   if (have_home) { cfg.home_lat = home_lat; cfg.home_lon = home_lon; cfg.home_set = true; }

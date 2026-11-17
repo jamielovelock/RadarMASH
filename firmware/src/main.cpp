@@ -43,7 +43,8 @@
 #endif
 
 #define FW_VERSION "0.2.0-dev"
-#define USER_AGENT "RadarMASH/" FW_VERSION
+// Map and data servers ask programs to say who they are and where to find them.
+#define USER_AGENT "RadarMASH/" FW_VERSION " (+https://github.com/jamielovelock/RadarMASH)"
 
 extern "C" bool verifyRollbackLater() { return true; }   // stop the Arduino core confirming the image for us
 
