@@ -101,6 +101,7 @@ int parseAircraft(const char *text, size_t len, double home_lat, double home_lon
     str(item, "hex", a.hex, sizeof a.hex);
     if (!str(item, "flight", a.callsign, sizeof a.callsign) && !str(item, "r", a.callsign, sizeof a.callsign))
       snprintf(a.callsign, sizeof a.callsign, "%s", a.hex);
+    airlineFromCallsign(a.callsign, a.airline_icao);
     if (num(item, "gs", v)) a.speed_kt = (float)(v < 0 ? 0 : v > 9999 ? 9999 : v);
     if (num(item, "baro_rate", v) || num(item, "geom_rate", v)) a.climb_fpm = (int16_t)(v < -30000 ? -30000 : v > 30000 ? 30000 : v);
     if (num(item, "track", v) || num(item, "true_heading", v) || num(item, "mag_heading", v)) a.track_deg = (float)fmod(fmod(v, 360.0) + 360.0, 360.0);
@@ -125,7 +126,7 @@ RouteResult parseRoute(const char *text, size_t len, RouteInfo &out) {
   if (!json::isObject(resp)) return RouteResult::Unknown;               // "unknown callsign"
   if (!json::member(resp, "flightroute", route) || !json::isObject(route)) return RouteResult::Unknown;
   out = RouteInfo();
-  if (json::member(route, "airline", v)) str(v, "name", out.airline, sizeof out.airline);
+  if (json::member(route, "airline", v)) { str(v, "name", out.airline, sizeof out.airline); str(v, "icao", out.airline_icao, sizeof out.airline_icao); }
   bool o_pos = false, d_pos = false;
   if (json::member(route, "origin", v)) {
     if (!str(v, "iata_code", out.origin, sizeof out.origin)) str(v, "icao_code", out.origin, sizeof out.origin);

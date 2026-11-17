@@ -481,12 +481,113 @@ static void updateMap() {
   map_missing = missing; map_built_ms = millis(); map_built_for = key;
 }
 
+// ---- airline logos (needs PSRAM) ----
+// None are built in. If the settings give an address pattern, each airline's logo is fetched the first time one of its
+// aircraft is highlighted, shrunk to size and kept in memory until the device restarts.
+static String logo_url;
+static int logos_loaded = 0, logos_missing = 0;
+
+struct DeviceLogos : LogoSource {
+  enum State : uint8_t { EMPTY, WANTED, LOADED, MISSING };
+  struct Entry { char icao[4]; State state; Logo *logo; };
+  Entry entries[24] = {};
+  int next = 0;
+
+  const Logo *logo(const char *icao) override {            // called while drawing, with the radar lock held
+    if (!logo_url.length() || !psramOk()) return nullptr;
+    for (Entry &e : entries)
+      if (e.state != EMPTY && strcmp(e.icao, icao) == 0) return e.state == LOADED ? e.logo : nullptr;
+    Entry &e = entries[next]; next = (next + 1) % (int)(sizeof entries / sizeof entries[0]);   // reuse the oldest slot
+    snprintf(e.icao, sizeof e.icao, "%s", icao);
+    e.state = WANTED;                                      // its picture, if it had one, is reused when the new one loads
+    return nullptr;
+  }
+  void forgetAll() { for (Entry &e : entries) e.state = EMPTY; }
+};
+static DeviceLogos device_logos;
+
+struct LogoJob { uint8_t *rgba; int w, h; bool ok; };
+
+// One decoded line of a PNG, whatever kind it is, as red, green, blue, alpha.
+static int logoLine(PNGDRAW *d) {
+  LogoJob *j = (LogoJob *)d->pUser;
+  if (d->y < 0 || d->y >= j->h || d->iWidth > j->w) return 1;
+  uint8_t *out = j->rgba + (size_t)d->y * j->w * 4;
+  const uint8_t *s = d->pPixels;
+  switch (d->iPixelType) {
+    case PNG_PIXEL_INDEXED:                                // 1, 2, 4 or 8 bits a pixel, most significant first
+      for (int x = 0; x < d->iWidth; x++) {
+        int idx;
+        if (d->iBpp == 8) idx = s[x];
+        else { int per = 8 / d->iBpp, shift = 8 - d->iBpp * (x % per + 1); idx = (s[x / per] >> shift) & ((1 << d->iBpp) - 1); }
+        const uint8_t *c = d->pPalette + idx * 3;
+        out[0] = c[0]; out[1] = c[1]; out[2] = c[2]; out[3] = d->iHasAlpha ? d->pPalette[768 + idx] : 255;
+        out += 4;
+      }
+      break;
+    case PNG_PIXEL_TRUECOLOR_ALPHA:
+      if (d->iBpp != 8) { j->ok = false; return 0; }
+      memcpy(out, s, (size_t)d->iWidth * 4);
+      break;
+    case PNG_PIXEL_TRUECOLOR:
+      if (d->iBpp != 8) { j->ok = false; return 0; }
+      for (int x = 0; x < d->iWidth; x++, out += 4, s += 3) { out[0] = s[0]; out[1] = s[1]; out[2] = s[2]; out[3] = 255; }
+      break;
+    case PNG_PIXEL_GRAY_ALPHA:
+      if (d->iBpp != 8) { j->ok = false; return 0; }
+      for (int x = 0; x < d->iWidth; x++, out += 4, s += 2) { out[0] = out[1] = out[2] = s[0]; out[3] = s[1]; }
+      break;
+    case PNG_PIXEL_GRAYSCALE:
+      if (d->iBpp != 8) { j->ok = false; return 0; }
+      for (int x = 0; x < d->iWidth; x++, out += 4) { out[0] = out[1] = out[2] = s[x]; out[3] = 255; }
+      break;
+    default: j->ok = false; return 0;
+  }
+  return 1;
+}
+
+static void fetchOneLogo() {
+  char icao[4] = "";
+  String tmpl;
+  { Lock lock;
+    tmpl = logo_url;
+    for (DeviceLogos::Entry &e : device_logos.entries) if (e.state == DeviceLogos::WANTED) { memcpy(icao, e.icao, sizeof icao); break; } }
+  if (!icao[0] || !tmpl.length() || !mapSetup()) return;   // mapSetup() also makes the PNG decoder
+  String url = tmpl;
+  url.replace("{icao}", icao);
+  uint8_t *data = nullptr; int len = 0;
+  Logo *made = nullptr;
+  if (fetchBytes(url, data, len)) {
+    if (png->openRAM(data, len, logoLine) == PNG_SUCCESS) {
+      LogoJob job{nullptr, png->getWidth(), png->getHeight(), true};
+      if (job.w >= 1 && job.h >= 1 && job.w <= 320 && job.h <= 320 && (job.rgba = (uint8_t *)heap_caps_calloc((size_t)job.w * job.h, 4, MALLOC_CAP_SPIRAM)) != nullptr) {
+        if (png->decode(&job, 0) == PNG_SUCCESS && job.ok) {
+          made = (Logo *)heap_caps_malloc(sizeof(Logo), MALLOC_CAP_SPIRAM);
+          if (made && !makeLogo(job.rgba, job.w, job.h, *made)) { heap_caps_free(made); made = nullptr; }
+        }
+        heap_caps_free(job.rgba);
+      }
+      png->close();
+    }
+    heap_caps_free(data);
+  }
+  Lock lock;
+  for (DeviceLogos::Entry &e : device_logos.entries) {
+    if (e.state != DeviceLogos::WANTED || strcmp(e.icao, icao) != 0) continue;
+    if (e.logo) { heap_caps_free(e.logo); e.logo = nullptr; }
+    e.logo = made; made = nullptr;
+    e.state = e.logo ? DeviceLogos::LOADED : DeviceLogos::MISSING;   // an airline with no logo there is not asked for again
+    if (e.logo) logos_loaded++; else logos_missing++;
+  }
+  if (made) heap_caps_free(made);
+}
+
 static void feedTask(void *) {
   fresh = (Aircraft *)heap_caps_malloc(sizeof(Aircraft) * MAX_AIRCRAFT, psramOk() ? MALLOC_CAP_SPIRAM : MALLOC_CAP_DEFAULT);
   for (int i = 0; fresh && i < MAX_AIRCRAFT; i++) new (&fresh[i]) Aircraft();
   for (;;) {
     uint32_t began = millis();
-    if (WiFi.status() == WL_CONNECTED) updateMap();
+    if (WiFi.status() == WL_CONNECTED) { updateMap(); fetchOneLogo(); }
     if (fresh && live_mode && WiFi.status() == WL_CONNECTED) { pollFeed(); lookupOneRoute(); }
     uint32_t every = (uint32_t)constrain(refresh_s, 2, 300) * 1000UL, took = millis() - began;
     vTaskDelay(pdMS_TO_TICKS(took < every ? every - took : 200));
@@ -723,6 +824,7 @@ static void applyConfig() {                         // caller holds the lock (or
   refresh_s = cfg.refresh_s; include_ground = cfg.include_ground; verify_certs = cfg.verify_certs;
   feed_url = cfg.feed_url;                          // (also undoes any automatic swap to the other feed)
   map_url = cfg.map_url;
+  if (logo_url != cfg.logo_url) { logo_url = cfg.logo_url; device_logos.forgetAll(); }   // a different source: start again
   snprintf(map_credit, sizeof map_credit, "%s", cfg.map_credit);
   snprintf(radar.map_credit, sizeof radar.map_credit, "%s", cfg.map_credit);
   live_mode = cfg.wantsLive();
@@ -785,6 +887,7 @@ static void hStatus() {
   j += ",\"map\":" + String(radar.map ? "true" : "false") + ",\"map_zoom\":" + String(map_front ? map_front->zoom : -1);
   j += ",\"map_tiles\":" + String(map_tiles_fetched) + ",\"map_tile_failures\":" + String(map_tiles_failed) + ",\"map_decode_failures\":" + String(map_decode_failed);
   j += ",\"time_set\":" + String(time(nullptr) > 1700000000 ? "true" : "false") + ",\"verify_certs\":" + String(verify_certs ? "true" : "false");
+  j += ",\"logos\":" + String(logos_loaded) + ",\"logos_missing\":" + String(logos_missing);
   j += ",\"panel_err\":" + String((int)panel_err) + ",\"cache\":" + String(radar.cache ? "true" : "false");
   j += ",\"psram\":" + String(psramOk() ? "true" : "false") + ",\"psram_free\":" + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   j += ",\"reset_reason\":" + String((int)esp_reset_reason()) + ",\"uptime_ms\":" + String(millis());
@@ -859,6 +962,16 @@ static void hTlsTest() {
   }
   server.send(200, "application/json", j + "}}");
 }
+// "Start this firmware once more, still on trial." Points the boot selector at this image without confirming it, so
+// the next start, including one from a power cycle, runs it again as a trial; a reset after that goes back to the other
+// firmware as usual. This is how a cold power-on is tested before deciding to keep the firmware.
+static void hTrialAgain() {
+  touch();
+  esp_err_t e = esp_ota_set_boot_partition(running_p);
+  const esp_partition_t *b = esp_ota_get_boot_partition();
+  server.send(e == ESP_OK ? 200 : 500, "application/json", String("{\"ok\":") + (e == ESP_OK ? "true" : "false") + ",\"next_boot\":\"" + (b ? b->label : "?") +
+                                                               "\",\"state\":" + String(runningState()) + ",\"confirmed\":" + (confirmed() ? "true" : "false") + "}");
+}
 static void hStay() { touch(); bool c = confirmSelf(); server.send(c ? 200 : 500, "text/plain", c ? "confirmed: this image now survives resets" : "confirm failed"); }
 static void hStock() {
   touch();
@@ -879,6 +992,7 @@ void setup() {
   if (!confirmed() && otherHasApp()) arm_err = esp_ota_set_boot_partition(other_p);   // any reset from here goes back to the other slot
 
   radar_mu = xSemaphoreCreateMutex();
+  radar.logos = &device_logos;
   loadConfig();                                                // saved settings, before anything is drawn
   if (psramOk()) {                                             // with the external memory, keep the still background ready
     void *mem = heap_caps_malloc(sizeof(ScopeCache), MALLOC_CAP_SPIRAM);
@@ -945,6 +1059,7 @@ void setup() {
   server.on("/api/wifi", HTTP_POST, hWifiJoin);
   server.on("/api/wifi/portal", HTTP_POST, hWifiPortal);
   server.on("/api/keep", HTTP_POST, hKeep);
+  server.on("/api/trial-again", HTTP_POST, hTrialAgain);
   server.on("/", hUi);
   server.on("/api/status", hStatus);
   server.on("/status", hStatus);                       // older name, kept for scripts

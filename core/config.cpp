@@ -13,6 +13,7 @@ Config::Config() {
   snprintf(feed_url, sizeof feed_url, "%s", FEED_ADSB_FI);
   snprintf(map_url, sizeof map_url, "%s", MAP_OSM);
   snprintf(map_credit, sizeof map_credit, "%s", "(c) OpenStreetMap");
+  logo_url[0] = 0;
 }
 
 // ---- writing ----
@@ -51,6 +52,7 @@ size_t configToJson(const Config &c, char *out, size_t n) {
   o.str("feed_url", c.feed_url);
   o.str("map_url", c.map_url);
   o.str("map_credit", c.map_credit);
+  o.str("logo_url", c.logo_url);
   if (!o.ok || o.used + 1 >= n) { out[0] = 0; return 0; }
   out[o.used - 1] = '}';                                // replace the last comma
   out[o.used] = 0;
@@ -117,6 +119,11 @@ bool configFromJson(const char *text, size_t len, Config &c) {
   }
   getUrl(root, "feed_url", c.feed_url, sizeof c.feed_url);
   getUrl(root, "map_url", c.map_url, sizeof c.map_url);
+  if (json::member(root, "logo_url", v)) {
+    char buf[8];
+    if (json::string(v, buf, sizeof buf) && !buf[0]) c.logo_url[0] = 0;          // an empty string turns logos off
+    else getUrl(root, "logo_url", c.logo_url, sizeof c.logo_url);
+  }
   if (json::member(root, "map_credit", v)) {
     char buf[sizeof c.map_credit];
     if (json::string(v, buf, sizeof buf)) memcpy(c.map_credit, buf, sizeof buf);

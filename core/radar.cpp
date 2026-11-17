@@ -34,6 +34,7 @@ const Toggle TOGGLES[] = {
   {"tag", "Tag box", &Settings::tag}, {"tag_route", "Tag: route", &Settings::tag_route}, {"tag_type", "Tag: type", &Settings::tag_type},
   {"tag_level", "Tag: level", &Settings::tag_level}, {"tag_speed", "Tag: speed", &Settings::tag_speed},
   {"card", "Large card", &Settings::card}, {"map", "Map", &Settings::map}, {"declutter", "Avoid overlapping labels", &Settings::declutter},
+  {"logos", "Airline logos", &Settings::logos},
 };
 const int TOGGLE_COUNT = (int)(sizeof TOGGLES / sizeof TOGGLES[0]);
 
@@ -68,6 +69,7 @@ void Radar::update(Aircraft *fresh, int n, uint32_t t) {
       if (strcmp(ac[k].hex, f.hex) == 0) { old = &ac[k]; break; }
     if (!old) continue;
     f.label_slot = old->label_slot;                                  // its label stays where it was
+    if (!f.airline_icao[0]) memcpy(f.airline_icao, old->airline_icao, sizeof f.airline_icao);
     if (!f.airline[0]) memcpy(f.airline, old->airline, sizeof f.airline);
     if (!f.origin[0]) { memcpy(f.origin, old->origin, sizeof f.origin); memcpy(f.dest, old->dest, sizeof f.dest); }
     // the previous report becomes the newest trail point, unless the aircraft has barely moved
@@ -442,7 +444,10 @@ void Radar::layoutLabels() const {
   auto mixin = [&key](uint32_t v) { key = (key ^ v) * 16777619u; };
   mixin(now_ms); mixin((uint32_t)count); mixin((uint32_t)selected); mixin((uint32_t)(range_km * 16)); mixin(set.font);
   mixin((set.labels ? 1u : 0) | (set.altitude ? 2u : 0) | (set.tag ? 4u : 0) | (set.tag_route ? 8u : 0) | (set.tag_type ? 16u : 0) |
-        (set.tag_level ? 32u : 0) | (set.tag_speed ? 64u : 0) | (set.declutter ? 128u : 0));
+        (set.tag_level ? 32u : 0) | (set.tag_speed ? 64u : 0) | (set.declutter ? 128u : 0) | (set.logos ? 256u : 0));
+  // the highlighted aircraft's logo may arrive at any moment; when it does the box grows to hold it
+  const Logo *logo = set.logos && logos && set.tag && selected >= 0 && selected < count && ac[selected].airline_icao[0] ? logos->logo(ac[selected].airline_icao) : nullptr;
+  mixin((uint32_t)(uintptr_t)logo);
   for (int i = 0; i < count; i++) { mixin((uint32_t)(int32_t)(ac[i].lat * 1e5)); mixin((uint32_t)(int32_t)(ac[i].lon * 1e5)); mixin((uint8_t)ac[i].callsign[0]); }
   if (key == layout_key_) return;                                    // same frame: already done
   layout_key_ = key;
@@ -458,6 +463,7 @@ void Radar::layoutLabels() const {
   }
 
   tag_w_ = 0;
+  tag_logo_ = logo;
   if (selected >= 0 && selected < count && seen[selected] && set.tag) {
     const Aircraft &a = ac[selected];
     char route[16], data[32];
@@ -467,6 +473,7 @@ void Radar::layoutLabels() const {
     if (route[0]) { int rw = Canvas::textWidth(route, 2); if (rw > w) w = rw; h += line; }
     if (data[0]) { int dw = Canvas::textWidth(data, 1); if (dw > w) w = dw; h += small; }
     w += 10; h += 8;
+    if (logo) { w += LOGO_SIZE + 6; if (h < LOGO_SIZE + 8) h = LOGO_SIZE + 8; }
     const int x = (int)sx[selected], y = (int)sy[selected], gap = 20;
     const int cand[4][2] = {{x + gap, y - h / 2}, {x - gap - w, y - h / 2}, {x - w / 2, y + gap}, {x - w / 2, y - gap - h}};
     int bx = cand[0][0], by = cand[0][1];
@@ -506,20 +513,36 @@ void Radar::layoutLabels() const {
 }
 
 // Small box beside the highlighted aircraft: callsign, then whichever extra lines the settings ask for.
-static void drawTag(Canvas &c, const Settings &set, const Aircraft &a, int bx, int by, int w, int h) {
+static void drawLogo(Canvas &c, const Logo &l, int x, int y) {
+  for (int ly = 0; ly < LOGO_SIZE; ly++) {
+    if (!c.hasRow(y + ly)) continue;
+    const uint16_t *px = l.px + ly * LOGO_SIZE;
+    const uint8_t *a = l.alpha + ly * LOGO_SIZE;
+    for (int lx = 0; lx < LOGO_SIZE; lx++)
+      if (a[lx]) c.blend(x + lx, y + ly, px[lx], a[lx]);
+  }
+}
+
+static void drawTag(Canvas &c, const Settings &set, const Aircraft &a, int bx, int by, int w, int h, const Logo *logo) {
   char route[16], data[32];
   tagText(set, a, route, sizeof route, data, sizeof data);
   const int line = lineHeight(2) + 3;
   c.blendRect(bx, by, w, h, COL_CARD, 225);
   c.blendRect(bx, by, w, 1, COL_SEL, 255); c.blendRect(bx, by + h - 1, w, 1, COL_SEL, 255);
   c.blendRect(bx, by, 1, h, COL_SEL, 255); c.blendRect(bx + w - 1, by, 1, h, COL_SEL, 255);
-  int ty = by + 5;
-  c.text(bx + 5, ty, a.callsign, 2, COL_SEL); ty += line;
-  if (route[0]) { c.text(bx + 5, ty, route, 2, COL_ROUTE); ty += line; }
-  if (data[0]) c.text(bx + 5, ty, data, 1, COL_LABEL);
+  int tx = bx + 5, ty = by + 5;
+  if (logo) {
+    drawLogo(c, *logo, bx + 4, by + (h - LOGO_SIZE) / 2);
+    tx += LOGO_SIZE + 6;
+    int lines = 1 + (route[0] ? 1 : 0), text_h = lines * line - 3 + (data[0] ? lineHeight(1) + 3 : 0);
+    if (text_h < h - 8) ty = by + (h - text_h) / 2;                  // a short tag: centre the text beside the logo
+  }
+  c.text(tx, ty, a.callsign, 2, COL_SEL); ty += line;
+  if (route[0]) { c.text(tx, ty, route, 2, COL_ROUTE); ty += line; }
+  if (data[0]) c.text(tx, ty, data, 1, COL_LABEL);
 }
 
-static void drawAircraft(Canvas &c, const Radar &r, const Aircraft &a, float x, float y, bool sel, const int16_t *tag) {
+static void drawAircraft(Canvas &c, const Radar &r, const Aircraft &a, float x, float y, bool sel, const int16_t *tag, const Logo *logo) {
   const Settings &set = r.set;
   Color col = sel ? COL_SEL : a.shape == Shape::Military ? COL_MIL : COL_BLIP;
   Color label = COL_LABEL, level = COL_TEXT_DIM;
@@ -533,7 +556,7 @@ static void drawAircraft(Canvas &c, const Radar &r, const Aircraft &a, float x, 
   if (y + 90 < c.y0 || y - 90 >= c.y0 + c.rows) return;
   drawIcon(c, set.shapes ? a.shape : Shape::Unknown, x, y, a.track_deg, col);
   if (sel) c.ring(x, y, 17, COL_SEL);
-  if (sel && set.tag && tag[2] > 0) { drawTag(c, set, a, tag[0], tag[1], tag[2], tag[3]); return; }
+  if (sel && set.tag && tag[2] > 0) { drawTag(c, set, a, tag[0], tag[1], tag[2], tag[3], logo); return; }
   if (!set.labels && !sel) return;
   const int h2 = lineHeight(2);
   if (a.label_slot >= 2) {                                           // moved away from its aircraft: a short tick ties them together
@@ -587,11 +610,11 @@ void Radar::draw(Canvas &c) const {
   const int16_t tag[4] = {tag_x_, tag_y_, tag_w_, tag_h_};
   float x, y;
   for (int i = 0; i < count; i++)
-    if (i != selected && project(ac[i], x, y)) drawAircraft(c, *this, ac[i], x, y, false, tag);
+    if (i != selected && project(ac[i], x, y)) drawAircraft(c, *this, ac[i], x, y, false, tag, nullptr);
   c.disc(CENTRE, CENTRE, 2.5f, COL_SWEEP);
   if (selected >= 0 && selected < count && project(ac[selected], x, y)) {
     if (set.card) drawCard(c, ac[selected], y > CENTRE);
-    drawAircraft(c, *this, ac[selected], x, y, true, tag);
+    drawAircraft(c, *this, ac[selected], x, y, true, tag, tag_logo_);
   }
 }
 
@@ -639,6 +662,7 @@ void demoTraffic(Radar &r, uint32_t now_ms) {
     Aircraft &a = r.ac[i];
     snprintf(a.callsign, sizeof a.callsign, "%s", d.callsign);
     snprintf(a.airline, sizeof a.airline, "%s", d.airline);
+    airlineFromCallsign(d.callsign, a.airline_icao);
     snprintf(a.type, sizeof a.type, "%s", d.type);
     snprintf(a.origin, sizeof a.origin, "%s", d.origin);
     snprintf(a.dest, sizeof a.dest, "%s", d.dest);

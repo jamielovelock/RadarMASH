@@ -6,6 +6,7 @@
 #pragma once
 #include "canvas.h"
 #include "font.h"
+#include "logo.h"
 #include "map.h"
 #include <stdint.h>
 
@@ -20,6 +21,7 @@ struct Aircraft {
   char hex[7] = "";            // ICAO 24-bit address: what identifies an aircraft from one update to the next
   char callsign[9] = "";
   char airline[26] = "";      // operator name, empty if unknown
+  char airline_icao[4] = "";  // operator code, e.g. RYR; from the callsign or the route lookup
   char type[5] = "";          // ICAO type, e.g. B77W
   char origin[5] = "";        // airport code, empty if unknown
   char dest[5] = "";
@@ -58,6 +60,7 @@ struct Settings {
   bool auto_cycle = true;     // highlight each aircraft in view in turn
   bool card = false;          // large detail card for the highlighted aircraft
   bool declutter = true;      // move labels so they do not sit on each other, on aircraft or on the tag box
+  bool logos = true;          // airline logo in the tag box, when a logo source has been set
   bool map = true;            // map underlay, when one has been loaded
   MapStyle map_style = MapStyle::Dark;
   uint8_t map_brightness = 55;                // percent
@@ -96,6 +99,7 @@ struct Radar {
   int selected = -1;          // index into ac, or -1
   const MapImage *map = nullptr;                // underlay to draw, owned by the caller
   ScopeCache *cache = nullptr;                  // optional, owned by the caller; see ScopeCache
+  LogoSource *logos = nullptr;                  // optional, owned by the caller; see logo.h
   char map_credit[28] = "";                     // attribution the map source asks for, shown at the bottom
   float sweep_deg = 0;        // current sweep bearing
   uint32_t now_ms = 0, last_cycle_ms = 0;
@@ -115,6 +119,7 @@ private:
   void layoutLabels() const;                    // decides where every label and the tag box go, once per frame
   mutable uint32_t layout_key_ = 0;
   mutable int16_t tag_x_ = 0, tag_y_ = 0, tag_w_ = 0, tag_h_ = 0;
+  mutable const Logo *tag_logo_ = nullptr;
   // kilometres per degree of longitude at home, remembered so the cosine is not recomputed for every point drawn
   mutable double kx_for_lat_ = 1e9;
   mutable float kx_ = 0;

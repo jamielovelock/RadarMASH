@@ -13,6 +13,7 @@
 #include "admin_html.h"
 #include "wifi_html.h"
 #include "live.h"
+#include "logos.h"
 #include "tiles.h"
 #include <arpa/inet.h>
 #include <chrono>
@@ -37,6 +38,7 @@ static Radar radar;
 static std::mutex radar_mu;                // the live-data thread and the web requests both touch the radar
 static Config cfg;                         // what the settings page shows and what is saved
 static Live live;
+static SimLogos logos;                     // airline logos, if the settings name a source
 static ScopeCache scope_cache;             // the same speed-up the device uses, so the simulator shows the same picture
 static std::string fake_wifi_ssid;         // stand-ins for the device's Wi-Fi setup, so that page can be developed here
 static bool fake_wifi_ok = false;
@@ -83,7 +85,9 @@ static void applyConfig() {
   live.feed_url = cfg.feed_url; live.refresh_s = cfg.refresh_s; live.include_ground = cfg.include_ground;
   live.enabled = cfg.wantsLive();
   tiles.url_template = cfg.map_url;
-  tiles.verify_certs = live.verify_certs = cfg.verify_certs;
+  tiles.verify_certs = live.verify_certs = logos.verify_certs = cfg.verify_certs;
+  logos.url_template = cfg.logo_url;
+  radar.logos = &logos;
   if (was_live != live.enabled || moved) { radar.count = 0; radar.selected = -1; live.last_count = -1; live.last_ok = 0; }   // a different sky
 }
 
@@ -180,9 +184,9 @@ static std::string statusJson() {
   char j[600];
   long age = live.last_ok ? (long)time(nullptr) - live.last_ok : -1;
   snprintf(j, sizeof j, "{\"device\":false,\"version\":\"simulator\",\"live\":%s,\"aircraft\":%d,\"feed_age_s\":%ld,\"feed_error\":\"%s\",\"map_missing\":%d,\"range_km\":%d,"
-           "\"lookups\":%d,\"second_opinions\":%d,\"routes_rejected\":%d}",
+           "\"lookups\":%d,\"second_opinions\":%d,\"routes_rejected\":%d,\"logos\":%d,\"logos_missing\":%d}",
            live.enabled ? "true" : "false", radar.count, age, jsonEscape(live.last_error).c_str(), radar.map ? map_image.missing : 0, (int)radar.range_km,
-           live.lookups, live.second_opinions, live.routes_rejected);
+           live.lookups, live.second_opinions, live.routes_rejected, logos.fetched, logos.missing);
   return j;
 }
 
@@ -291,7 +295,7 @@ int main(int argc, char **argv) {
   }
   if (want_live && shot) { fprintf(stderr, "--live cannot be used with --shot\n"); return 2; }
   const char *ua = getenv("RADARMASH_UA");
-  tiles.user_agent = live.user_agent = ua && *ua ? ua : "RadarMASH-simulator/0.1";
+  tiles.user_agent = live.user_agent = logos.user_agent = ua && *ua ? ua : "RadarMASH-simulator/0.1";
 
   if (!shot) { save_settings = true; loadConfig(); }      // a still frame always starts from the defaults
   if (have_home) { cfg.home_lat = home_lat; cfg.home_lon = home_lon; cfg.home_set = true; }
@@ -310,6 +314,7 @@ int main(int argc, char **argv) {
   applyConfig();
 
   if (!shot) {
+    live.background = [] { logos.fetchPending(radar_mu); };
     live.start(&radar, &radar_mu, nowMs);
     return serve(port);
   }

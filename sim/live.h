@@ -18,6 +18,7 @@ struct Live {
   bool routes = true;
   bool verify_certs = true;     // off: pass -k to curl
   bool enabled = false;         // poll only while this is set (live mode)
+  void (*background)() = nullptr;   // extra work for this thread each cycle (the simulator fetches logos here)
 
   // status, for the page
   int last_count = -1;          // aircraft in the last good reply, or -1 before the first

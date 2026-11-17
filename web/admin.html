@@ -62,6 +62,8 @@
       <option value="https://api.adsb.lol/v2/point/{lat}/{lon}/{nm}">adsb.lol</option></select></div>
     <div class="row"><span>Refresh every</span><input type="number" min="2" max="300" data-k="refresh_s"><small>seconds</small></div>
     <div class="row"><span>Show at most</span><input type="number" min="1" max="64" data-k="max_aircraft"><small>aircraft, nearest first</small></div>
+    <div class="row"><span>Airline logos</span><input type="text" data-k="logo_url" spellcheck="false" placeholder="none"></div>
+    <p class="hint">RadarMASH comes with no logos: they are the airlines' trademarks. To show them, give the address of a collection with {icao} where the airline's three-letter code goes, for example https://example.org/logos/{icao}.png. Clear the box to turn them off.</p>
     <div class="row"><span>On the ground</span><label><input type="checkbox" data-k="include_ground"> include aircraft on the ground</label></div>
   </section>
 
@@ -92,7 +94,7 @@
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const NAMES = {sweep:'Sweep', rings:'Range rings', labels:'Callsigns', altitude:'Altitude', trails:'Trails', fade:'Fade after sweep',
   shapes:'Aircraft shapes', auto_cycle:'Cycle through aircraft', tag:'Tag box', tag_route:'Tag: route', tag_type:'Tag: type',
-  tag_level:'Tag: level', tag_speed:'Tag: speed', card:'Large card', map:'Map', declutter:'Avoid overlapping labels'};
+  tag_level:'Tag: level', tag_speed:'Tag: speed', card:'Large card', map:'Map', declutter:'Avoid overlapping labels', logos:'Airline logos'};
 let cfg = {};
 
 function flash() { const s = $('#saved'); s.classList.add('on'); clearTimeout(flash.t); flash.t = setTimeout(() => s.classList.remove('on'), 900); }

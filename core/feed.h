@@ -28,6 +28,7 @@ int parseAircraft(const char *text, size_t len, double home_lat, double home_lon
 
 struct RouteInfo {
   char airline[26] = "";
+  char airline_icao[4] = "";          // e.g. RYR, when the service gives it
   char origin[5] = "";
   char dest[5] = "";
   bool have_pos = false;              // are the two airports' positions known?
