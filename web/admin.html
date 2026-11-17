@@ -80,6 +80,8 @@
     <div class="row"><span>Firmware</span><span id="fw"></span></div>
     <div class="row"><span>Wi-Fi</span><span id="net"></span><a href="/wifi">Change Wi-Fi</a></div>
     <div class="row" id="keeprow" hidden><span>On trial</span><button id="keep">Keep this firmware</button></div>
+    <div class="row"><span>Update</span><input type="file" id="fwfile" accept=".bin"><button id="fwgo">Upload firmware</button></div>
+    <p class="hint" id="fwmsg"></p>
     <div class="row"><span>Restart</span><button data-post="/api/reboot" data-confirm="Restart the radar?">Restart</button></div>
     <p class="hint" id="bootnote"></p>
   </section>
@@ -136,6 +138,18 @@ function build() {
   $('#keep').onclick = async () => {
     if (!confirm('Keep this firmware permanently?\n\nAfter this, a restart or power cycle will no longer return to the previous firmware. Only do it once this firmware has been working well on your Wi-Fi.')) return;
     await fetch('/api/keep', {method:'POST'}); status();
+  };
+  $('#fwgo').onclick = async () => {
+    const f = $('#fwfile').files[0], msg = $('#fwmsg');
+    if (!f) { msg.textContent = 'Choose a RadarMASH firmware file (.bin) first.'; return; }
+    if (!confirm('Upload ' + f.name + '?\n\nThe firmware running now becomes the permanent fallback, replacing whatever is in the other slot (including the original firmware, if that is what is there). The new firmware then starts on trial.')) return;
+    $('#fwgo').disabled = true; msg.textContent = 'Uploading ' + Math.round(f.size / 1024) + ' KB… do not unplug the radar.';
+    try {
+      const r = await fetch('/ota', {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:f});
+      const j = await r.json();
+      msg.textContent = j.ok ? 'Uploaded and checked. The radar is restarting into the new firmware; this page will reconnect.' : 'Not accepted: ' + (j.msg || 'unknown error') + '. Nothing was changed if it failed before writing.';
+    } catch (e) { msg.textContent = 'The upload did not complete. The firmware running now is untouched and still in charge.'; }
+    $('#fwgo').disabled = false;
   };
   $('#sethome').onclick = () => {
     const lat = Number($('#lat').value), lon = Number($('#lon').value);

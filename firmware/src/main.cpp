@@ -27,6 +27,7 @@
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <esp_psram.h>
+#include <esp_task_wdt.h>
 #include <esp_mac.h>
 #include <esp_wifi.h>
 #include <mbedtls/sha256.h>
@@ -620,6 +621,7 @@ static void otaRaw(bool dry) {                      // dry comes from the route:
       }
     }
     if (ota.total + r.currentSize > other_p->size) return otaFail("image larger than slot");
+    esp_task_wdt_reset();                             // a long upload is one long call from the main loop: it is alive
     mbedtls_sha256_update(&ota.sha, r.buf, r.currentSize);
     if (ota.begun) { esp_err_t e = esp_ota_write(ota.h, r.buf, r.currentSize); if (e != ESP_OK) return otaFail(String("esp_ota_write ") + esp_err_to_name(e)); }
     ota.total += r.currentSize;
@@ -890,6 +892,12 @@ void setup() {
   server.begin();
   xTaskCreatePinnedToCore(feedTask, "feed", 12288, nullptr, 1, nullptr, 0);
   last_activity_ms = millis();
+  // What "healthy" means here is that frames keep being drawn, so the watchdog watches the main loop. By default it
+  // watches the idle task on the first core instead, but that core is shared by Wi-Fi, the feed, the map and the screen
+  // sender, and when several are busy at once (a scan during a map download, say) idle can go unserved for seconds
+  // without anything being wrong. That reset the device twice.
+  disableCore0WDT();
+  enableLoopWDT();
 }
 
 void loop() {
