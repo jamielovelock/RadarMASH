@@ -29,6 +29,7 @@
   <section>
     <h2>Screen</h2>
     <div class="row"><span>Brightness</span><input type="range" min="1" max="100" data-k="brightness"><small data-show="brightness"></small></div>
+    <div class="row"><span>Font</span><select data-k="font" id="font"></select></div>
     <div class="row"><span>Range</span><select data-k="range_km" data-num>
       <option value="10">10 km</option><option value="20">20 km</option><option value="40">40 km</option><option value="80">80 km</option><option value="160">160 km</option></select>
       <button data-post="/api/press">Next aircraft</button><button data-post="/api/hold">Next range</button></div>
@@ -118,6 +119,9 @@ function build() {
       () => { $('#homehint').textContent = 'The browser would not give a location; type it in instead.'; })
     : ($('#homehint').textContent = 'This browser cannot give a location; type it in instead.');
 }
+async function fonts() {
+  try { for (const f of await (await fetch('/api/fonts')).json()) $('#font').add(new Option(f.name, f.id)); } catch (e) {}
+}
 async function load() { try { cfg = await (await fetch('/api/settings')).json(); fill(); } catch (e) {} }
 async function status() {
   try {
@@ -135,6 +139,6 @@ async function status() {
     if (s.range_km && document.activeElement !== $('[data-k="range_km"]')) $('[data-k="range_km"]').value = String(s.range_km);
   } catch (e) { $('#status').textContent = 'not reachable'; }
 }
-(async () => { await load(); build(); fill(); status(); setInterval(status, 3000); })();
+(async () => { await fonts(); await load(); build(); fill(); status(); setInterval(status, 3000); })();
 </script>
 </html>

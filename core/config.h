@@ -36,6 +36,6 @@ size_t configToJson(const Config &c, char *out, size_t out_size);
 // are clamped and nonsense is ignored. Returns false if the text is not a JSON object at all.
 bool configFromJson(const char *text, size_t len, Config &c);
 
-constexpr size_t CONFIG_JSON_MAX = 1400;   // a buffer this big always fits configToJson
+constexpr size_t CONFIG_JSON_MAX = 1440;   // a buffer this big always fits configToJson
 
 }  // namespace rm

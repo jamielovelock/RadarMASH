@@ -1,8 +1,11 @@
 // RadarMASH - open firmware for the GeekMagic Radar 360.
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../core/canvas.h"
+#include "../core/font.h"
 #include "test.h"
+#include <algorithm>
 #include <chrono>
+#include <string.h>
 #include <vector>
 
 using namespace rm;
@@ -160,4 +163,79 @@ TEST(triangle_fills_inside_only) {
   CHECK(g.at(110, 110) == WHITE);
   g.c.triangle(50, 50, 60, 60, 70, 70, WHITE);   // zero area: draws nothing, does not crash
   CHECK(g.at(60, 60) == 0);
+}
+
+// ---- fonts ----
+namespace {
+struct UseFont { int before; UseFont(int i) : before(currentFont()) { setFont(i); } ~UseFont() { setFont(before); } };
+}
+
+TEST(fonts_are_listed_and_found_by_id) {
+  CHECK(FONT_COUNT >= 5);
+  CHECK(fontIndex("classic") == 0);
+  for (int i = 0; i < FONT_COUNT; i++) {
+    CHECK(fontIndex(FONTS[i].id) == i);
+    CHECK(FONTS[i].name[0] != 0 && strlen(FONTS[i].id) < 16);
+  }
+  CHECK(fontIndex("no-such-font") == -1 && fontIndex("") == -1);
+  char buf[600];
+  size_t n = fontsJson(buf, sizeof buf);
+  CHECK(n > 20 && buf[0] == '[' && buf[n - 1] == ']' && strstr(buf, "\"id\":\"classic\""));
+  char tiny[8];
+  CHECK(fontsJson(tiny, sizeof tiny) == 0);
+}
+
+TEST(choosing_a_font_that_does_not_exist_falls_back) {
+  UseFont f(0);
+  setFont(999); CHECK(currentFont() == 0);
+  setFont(-3); CHECK(currentFont() == 0);
+  setFont(FONT_COUNT - 1); CHECK(currentFont() == FONT_COUNT - 1);
+}
+
+TEST(every_font_has_sensible_sizes) {
+  for (int i = 0; i < FONT_COUNT; i++) {
+    UseFont f(i);
+    CHECK(lineHeight(1) >= 8 && lineHeight(1) <= 12);
+    CHECK(lineHeight(2) == 16);                              // layouts are built around these two
+    CHECK(lineHeight(3) == 24);
+    CHECK(lineHeight(0) == lineHeight(1) && lineHeight(9) == lineHeight(3) * (i == 0 ? 3 : 1));
+    int narrow = Canvas::textWidth("RDR4077", 2), wide = Canvas::textWidth("RDR4077", 3);
+    CHECK(narrow > 30 && narrow <= 7 * 12 && wide > narrow);  // never wider than the classic font, so labels still fit
+    CHECK(Canvas::textWidth("", 2) == 0);
+    CHECK(Canvas::textWidth("\xF8", 2) > 0 && Canvas::textWidth("\x01\xFF", 2) > 0);   // degree sign; unknown bytes become '?'
+  }
+}
+
+TEST(every_font_draws_inside_its_line) {
+  for (int i = 0; i < FONT_COUNT; i++)
+    for (int size = 1; size <= 3; size++) {
+      UseFont f(i);
+      Frame fr;
+      const char *s = "Agjy|RDR4077 LHR>JFK 285\xF8";
+      fr.c.text(20, 100, s, size, WHITE);
+      int w = Canvas::textWidth(s, size), h = lineHeight(size), lit = 0;
+      for (int y = 0; y < SCREEN_H; y++)
+        for (int x = 0; x < SCREEN_W; x++)
+          if (fr.at(x, y)) { lit++; CHECK(y >= 100 && y < 100 + h); CHECK(x >= 18 && x <= 20 + w + 2); }
+      CHECK(lit > 60);
+    }
+}
+
+TEST(every_font_draws_the_same_in_strips) {
+  for (int i = 0; i < FONT_COUNT; i++) {
+    UseFont f(i);
+    Frame whole;
+    whole.c.text(-6, 93, "Clipped left and split by a strip edge 0123456789", 3, WHITE);
+    whole.c.text(250, 111, "runs off the right", 2, RED);
+    std::vector<uint16_t> joined((size_t)SCREEN_W * SCREEN_H, 0), strip((size_t)SCREEN_W * 7);
+    for (int y0 = 0; y0 < SCREEN_H; y0 += 7) {
+      int rows = y0 + 7 > SCREEN_H ? SCREEN_H - y0 : 7;
+      std::fill(strip.begin(), strip.end(), 0);
+      Canvas c(strip.data(), y0, rows);
+      c.text(-6, 93, "Clipped left and split by a strip edge 0123456789", 3, WHITE);
+      c.text(250, 111, "runs off the right", 2, RED);
+      memcpy(joined.data() + (size_t)y0 * SCREEN_W, strip.data(), (size_t)SCREEN_W * rows * 2);
+    }
+    CHECK(joined == whole.px);
+  }
 }

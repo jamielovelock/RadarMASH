@@ -79,7 +79,7 @@ Settings, including where the radar is, are stored on the device only.
 
 ## Settings
 
-One page (`web/admin.html`) sets everything: which features are shown, brightness, range, live or demo aircraft, where
+One page (`web/admin.html`) sets everything: which features are shown, the font, brightness, range, live or demo aircraft, where
 the radar is, the data source and refresh rate, and the map source, style and brightness. It talks JSON:
 
     GET  /api/settings            everything, as one object
@@ -89,6 +89,13 @@ the radar is, the data source and refresh rate, and the map source, style and br
 
 Values out of range are clamped and anything unrecognised is ignored, so an old page and new firmware (or the reverse)
 get along.
+
+## Fonts
+
+The settings page offers the original pixel font and four typefaces, each in three sizes with soft edges. To add or
+change one, edit the list in `tools/make_fonts.py` and run it (it needs Pillow, and downloads the font files into
+`build/`); it rewrites `core/fonts_data.cpp`, which is checked in so ordinary builds need neither. Only fonts that may
+be redistributed in a converted form under their own name are suitable.
 
 ## Tests
 
@@ -103,7 +110,9 @@ picture as drawing it whole.
 
 ## Licence
 
-GPL-3.0-or-later; see `LICENSE`. The firmware links the PNGdec library (Apache-2.0), fetched at build time. Two bundled files keep their own licences, reproduced inside them: `core/font5x7.h`
+GPL-3.0-or-later; see `LICENSE`. The firmware links the PNGdec library (Apache-2.0), fetched at build time. The fonts in
+`core/fonts_data.cpp` are bitmaps of B612 Mono, JetBrains Mono, Roboto Condensed and VT323, each under the SIL Open Font
+License 1.1 (see `licenses/`). Two bundled files keep their own licences, reproduced inside them: `core/font5x7.h`
 (Adafruit GFX Library, BSD) and `sim/third_party/stb_image.h` (stb, public domain / MIT; simulator only).
 
 RadarMASH is an independent hobby project. It is not affiliated with GeekMagic, and contains none of their code.

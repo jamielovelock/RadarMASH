@@ -421,9 +421,10 @@ static void drawTag(Canvas &c, const Settings &set, const Aircraft &a, float x, 
   if (set.tag_speed) n += snprintf(data + n, sizeof data - n, "%dkt ", (int)a.speed_kt);
   if (n) data[n - 1] = 0;                                            // drop the trailing space
 
-  int w = Canvas::textWidth(a.callsign, 2), h = 16;
-  if (route[0]) { int rw = Canvas::textWidth(route, 2); if (rw > w) w = rw; h += 19; }
-  if (data[0]) { int dw = Canvas::textWidth(data, 1); if (dw > w) w = dw; h += 11; }
+  const int line = lineHeight(2) + 3, small = lineHeight(1) + 3;    // line spacing follows the chosen font
+  int w = Canvas::textWidth(a.callsign, 2), h = line - 3;
+  if (route[0]) { int rw = Canvas::textWidth(route, 2); if (rw > w) w = rw; h += line; }
+  if (data[0]) { int dw = Canvas::textWidth(data, 1); if (dw > w) w = dw; h += small; }
   w += 10; h += 8;
 
   // try right, left, below, above; take the first place where the whole box is inside the scope
@@ -439,8 +440,8 @@ static void drawTag(Canvas &c, const Settings &set, const Aircraft &a, float x, 
   c.blendRect(bx, by, w, 1, COL_SEL, 255); c.blendRect(bx, by + h - 1, w, 1, COL_SEL, 255);
   c.blendRect(bx, by, 1, h, COL_SEL, 255); c.blendRect(bx + w - 1, by, 1, h, COL_SEL, 255);
   int ty = by + 5;
-  c.text(bx + 5, ty, a.callsign, 2, COL_SEL); ty += 19;
-  if (route[0]) { c.text(bx + 5, ty, route, 2, COL_ROUTE); ty += 19; }
+  c.text(bx + 5, ty, a.callsign, 2, COL_SEL); ty += line;
+  if (route[0]) { c.text(bx + 5, ty, route, 2, COL_ROUTE); ty += line; }
   if (data[0]) c.text(bx + 5, ty, data, 1, COL_LABEL);
 }
 
@@ -463,7 +464,7 @@ static void drawAircraft(Canvas &c, const Radar &r, const Aircraft &a, float x, 
   // label to the right, or to the left when that would run off the scope
   int w = Canvas::textWidth(a.callsign, 2);
   int lx = (x + 16 + w < CENTRE + RADAR_RADIUS - 8) ? (int)x + 16 : (int)x - 16 - w;
-  c.text(lx, (int)y - 16, a.callsign, 2, sel ? COL_SEL : label);
+  c.text(lx, (int)y - lineHeight(2), a.callsign, 2, sel ? COL_SEL : label);
   if (set.altitude) {
     char fl[12];                                                     // room for any int, however odd the data
     snprintf(fl, sizeof fl, "%03d", a.alt_ft / 100);
@@ -481,14 +482,16 @@ static void drawCard(Canvas &c, const Aircraft &a, bool at_top) {
   c.textCentred(180, y, a.airline[0] ? a.airline : "Private / unknown", 2, COL_SEL);
   if (a.origin[0] && a.dest[0]) snprintf(line, sizeof line, "%s > %s", a.origin, a.dest);
   else snprintf(line, sizeof line, "no route");
-  c.textCentred(180, y + 23, line, 3, COL_ROUTE);
+  const int medium = lineHeight(2) + 7, large = lineHeight(3) + 8;   // 23 and 32 with the classic font
+  c.textCentred(180, y + medium, line, 3, COL_ROUTE);
   snprintf(line, sizeof line, "%s  %s", a.callsign, a.type);
-  c.textCentred(180, y + 55, line, 2, COL_LABEL);
+  c.textCentred(180, y + medium + large, line, 2, COL_LABEL);
   snprintf(line, sizeof line, "FL%03d %dkt %03d\xF8", a.alt_ft / 100, (int)a.speed_kt, (int)a.track_deg);
-  c.textCentred(180, y + 78, line, 2, COL_LABEL);
+  c.textCentred(180, y + medium + large + medium, line, 2, COL_LABEL);
 }
 
 void Radar::draw(Canvas &c) const {
+  setFont(set.font);
   const MapImage *underlay = set.map && map && map->ready ? map : nullptr;
   if (cache && cache->valid && cache->key == scopeKey(*this, underlay)) drawScopeCached(c, *cache, set.sweep, sweep_deg);
   else drawScope(c, set, sweep_deg, underlay);

@@ -90,6 +90,18 @@ TEST(config_only_accepts_real_web_addresses) {
   CHECK(strlen(c.map_credit) == sizeof c.map_credit - 1);
 }
 
+TEST(config_font_is_stored_by_name) {
+  Config c;
+  CHECK(dump(c).find("\"font\":\"classic\"") != std::string::npos);
+  CHECK(load(c, "{\"font\":\"b612mono\"}"));
+  CHECK(c.set.font == fontIndex("b612mono") && c.set.font > 0);
+  CHECK(dump(c).find("\"font\":\"b612mono\"") != std::string::npos);
+  CHECK(load(c, "{\"font\":\"a-font-from-a-newer-version\"}") && load(c, "{\"font\":3}"));
+  CHECK(c.set.font == fontIndex("b612mono"));               // unknown: keep what we have
+  c.set.font = 200;                                         // a corrupt index never escapes into the JSON
+  CHECK(dump(c).find("\"font\":\"classic\"") != std::string::npos);
+}
+
 TEST(config_json_fits_its_buffer) {
   Config c;
   memset(c.feed_url, 'x', sizeof c.feed_url - 1); c.feed_url[sizeof c.feed_url - 1] = 0;

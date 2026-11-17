@@ -590,6 +590,7 @@ static void hSettingsPost() {
   markDirty();
   server.send(200, "application/json", buf);
 }
+static void hFonts() { char b[600]; fontsJson(b, sizeof b); server.send(200, "application/json", b); }
 static void hPress() { touch(); { Lock lock; radar.shortPress(); } ok(); }
 static void hHold() { touch(); { Lock lock; radar.longPress(); } markDirty(); ok(); }
 
@@ -664,6 +665,7 @@ void setup() {
   server.on("/status", hStatus);                       // older name, kept for scripts
   server.on("/api/settings", HTTP_GET, hSettingsGet);
   server.on("/api/settings", HTTP_POST, hSettingsPost);
+  server.on("/api/fonts", hFonts);
   server.on("/api/press", HTTP_POST, hPress);
   server.on("/api/hold", HTTP_POST, hHold);
   server.on("/api/reboot", HTTP_POST, hReboot);

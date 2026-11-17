@@ -294,6 +294,23 @@ TEST(every_switch_changes_the_picture) {
   CHECK(renderWhole(*r) == base);
 }
 
+TEST(radar_draws_the_same_in_strips_with_every_font) {
+  auto r = blankRadar();
+  demoTraffic(*r, 9000); r->tick(9000);
+  r->set.card = true;
+  Pixels classic;
+  for (int f = 0; f < FONT_COUNT; f++)
+    for (int sel = -1; sel < 2; sel++) {
+      r->set.font = (uint8_t)f; r->selected = sel;
+      Pixels whole = renderWhole(*r);
+      CHECK(whole == renderInBands(*r, 40));
+      CHECK(whole == renderInBands(*r, 7));
+      if (f == 0 && sel == 0) classic = whole;
+      if (f > 0 && sel == 0) CHECK(whole != classic);          // the font really changed the picture
+    }
+  setFont(0);
+}
+
 TEST(cached_scope_matches_the_slow_way) {
   // The cache is a speed-up, not a different picture: every pixel must be within a shade of the uncached result.
   auto r = blankRadar();

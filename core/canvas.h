@@ -37,10 +37,11 @@ struct Canvas {
   void disc(float cx, float cy, float r, Color c);             // anti-aliased filled circle
   void triangle(float ax, float ay, float bx, float by, float cx, float cy, Color c);   // filled
 
-  // 5x7 bitmap font in a 6x8 cell, scaled by an integer. Transparent background.
-  void text(int x, int y, const char *s, int scale, Color c);
-  void textCentred(int cx, int y, const char *s, int scale, Color c);
-  static int textWidth(const char *s, int scale);
+  // Text in the current font (see font.h) at size 1 (small), 2 (medium) or 3 (large); y is the top of the line.
+  // Transparent background. The byte 0xF8 is the degree sign.
+  void text(int x, int y, const char *s, int size, Color c);
+  void textCentred(int cx, int y, const char *s, int size, Color c);
+  static int textWidth(const char *s, int size);
 };
 
 }  // namespace rm

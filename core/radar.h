@@ -5,6 +5,7 @@
 // Portable: shared by the device firmware and the desktop simulator.
 #pragma once
 #include "canvas.h"
+#include "font.h"
 #include "map.h"
 #include <stdint.h>
 
@@ -56,6 +57,7 @@ struct Settings {
   MapStyle map_style = MapStyle::Dark;
   uint8_t map_brightness = 55;                // percent
   uint8_t max_aircraft = 10;                  // show at most this many, nearest home first (up to MAX_AIRCRAFT)
+  uint8_t font = 0;                           // index into FONTS
 };
 
 // The on/off switches by name, for settings pages. The simulator and the device both serve these.

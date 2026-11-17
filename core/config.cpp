@@ -45,6 +45,7 @@ size_t configToJson(const Config &c, char *out, size_t n) {
   o.add("\"home_set\":%s,\"home_lat\":%.5f,\"home_lon\":%.5f,", c.home_set ? "true" : "false", c.home_lat, c.home_lon);
   o.add("\"range_km\":%d,\"live\":%s,\"refresh_s\":%d,\"include_ground\":%s,\"brightness\":%d,", (int)lroundf(c.range_km), c.live ? "true" : "false",
         (int)c.refresh_s, c.include_ground ? "true" : "false", (int)c.brightness);
+  o.str("font", FONTS[c.set.font < FONT_COUNT ? c.set.font : 0].id);
   o.str("feed_url", c.feed_url);
   o.str("map_url", c.map_url);
   o.str("map_credit", c.map_credit);
@@ -104,6 +105,11 @@ bool configFromJson(const char *text, size_t len, Config &c) {
   if (getNum(root, "refresh_s", 2, 300, d)) c.refresh_s = (uint16_t)d;
   getBool(root, "include_ground", c.include_ground);
   if (getNum(root, "brightness", 1, 100, d)) c.brightness = (uint8_t)d;   // never fully dark: a black screen looks broken
+  if (json::member(root, "font", v)) {
+    char id[16];
+    int i = json::string(v, id, sizeof id) ? fontIndex(id) : -1;
+    if (i >= 0) c.set.font = (uint8_t)i;                    // a font this build does not have: keep the current one
+  }
   getUrl(root, "feed_url", c.feed_url, sizeof c.feed_url);
   getUrl(root, "map_url", c.map_url, sizeof c.map_url);
   if (json::member(root, "map_credit", v)) {

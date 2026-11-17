@@ -1,8 +1,10 @@
 // RadarMASH - open firmware for the GeekMagic Radar 360.
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "canvas.h"
+#include "font.h"
 #include "font5x7.h"
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 namespace rm {
@@ -124,11 +126,76 @@ void Canvas::triangle(float ax, float ay, float bx, float by, float cx, float cy
     }
 }
 
-int Canvas::textWidth(const char *s, int scale) { return *s ? (int)strlen(s) * 6 * scale - scale : 0; }
+// ---- fonts ----
+static int active_font = 0;
+
+int fontIndex(const char *id) {
+  for (int i = 0; i < FONT_COUNT; i++) if (strcmp(FONTS[i].id, id) == 0) return i;
+  return -1;
+}
+void setFont(int index) { active_font = index >= 0 && index < FONT_COUNT ? index : 0; }
+int currentFont() { return active_font; }
+
+static inline int tier(int size) { return size < 1 ? 0 : size > 3 ? 2 : size - 1; }
+static inline const FontFace *faceFor(int size) { return FONTS[active_font].face[tier(size)]; }
+// Which of a face's 96 glyphs draws this byte: ASCII, the degree sign (0xF8), or a question mark for anything else.
+static inline const Glyph &glyphFor(const FontFace *f, unsigned char ch) {
+  return f->glyphs[ch >= 32 && ch <= 126 ? ch - 32 : ch == 0xF8 ? 95 : '?' - 32];
+}
+
+int lineHeight(int size) {
+  const FontFace *f = faceFor(size);
+  return f ? f->height : 8 * (size < 1 ? 1 : size);
+}
+
+size_t fontsJson(char *out, size_t n) {
+  size_t used = 0;
+  for (int i = 0; i < FONT_COUNT; i++) {
+    int w = snprintf(out + used, n - used, "%s{\"id\":\"%s\",\"name\":\"%s\"}", i ? "," : "[", FONTS[i].id, FONTS[i].name);
+    if (w < 0 || (size_t)w >= n - used) { if (n) out[0] = 0; return 0; }
+    used += (size_t)w;
+  }
+  if (used + 2 > n) { if (n) out[0] = 0; return 0; }
+  out[used++] = ']'; out[used] = 0;
+  return used;
+}
+
+int Canvas::textWidth(const char *s, int size) {
+  const FontFace *f = faceFor(size);
+  if (!f) return *s ? (int)strlen(s) * 6 * size - size : 0;
+  int w = 0;
+  for (; *s; s++) w += glyphFor(f, (unsigned char)*s).advance;
+  return w;
+}
+
+// A typeface glyph: each pixel carries how much of it the letter covers, blended over what is already there.
+static void drawGlyph(Canvas &c, const FontFace *f, const Glyph &g, int x, int y, Color col) {
+  const int stride = (g.w + 1) / 2;
+  for (int row = 0; row < f->height; row++) {
+    int py = y + row;
+    if (!c.hasRow(py)) continue;
+    const uint8_t *bits = f->data + g.offset + row * stride;
+    for (int i = 0; i < g.w; i++) {
+      int a = (i & 1) ? bits[i >> 1] & 15 : bits[i >> 1] >> 4;
+      if (a) c.blend(x + g.left + i, py, col, a * 17);
+    }
+  }
+}
 
 void Canvas::text(int x, int y, const char *s, int scale, Color c) {
-  if (scale < 1 || y + 8 * scale <= y0 || y >= y0 + rows) return;
-  // Work out once which of the glyph's eight rows fall in this strip, then write pixels straight into the buffer.
+  if (scale < 1) return;
+  if (const FontFace *f = faceFor(scale)) {
+    if (y + f->height <= y0 || y >= y0 + rows) return;
+    for (; *s; s++) {
+      const Glyph &g = glyphFor(f, (unsigned char)*s);
+      if (x + g.left + g.w > 0 && x + g.left < SCREEN_W) drawGlyph(*this, f, g, x, y, c);
+      x += g.advance;
+    }
+    return;
+  }
+  if (y + 8 * scale <= y0 || y >= y0 + rows) return;
+  // The classic pixel font: work out once which of the glyph's eight rows fall in this strip, then write pixels
+  // straight into the buffer.
   for (; *s; s++, x += 6 * scale) {
     if (x + 5 * scale <= 0 || x >= SCREEN_W) continue;
     const uint8_t *g = FONT5X7 + (uint8_t)*s * 5;

@@ -229,6 +229,7 @@ static int serve(int port) {
         else { applyConfig(); saveConfig(); respondText(fd, settingsJson(), "application/json"); }
       }
       else if (path == "/api/status") respondText(fd, statusJson(), "application/json");
+      else if (path == "/api/fonts") { char b[600]; respond(fd, "application/json", b, fontsJson(b, sizeof b)); }
       else if (path == "/api/press" && post) { radar.shortPress(); respondText(fd, "ok"); }
       else if (path == "/api/hold" && post) { radar.longPress(); cfg.range_km = radar.range_km; saveConfig(); respondText(fd, "ok"); }
       else if (path == "/api/reboot" && post) respondText(fd, "ok");            // nothing to restart here
@@ -242,6 +243,7 @@ static int serve(int port) {
 int main(int argc, char **argv) {
   const char *shot = nullptr; uint32_t t = 2600; int select = -1, port = 8360, style = -1; float range = 0;
   bool want_map = false, no_map = false, want_live = false, have_home = false;
+  const char *font = nullptr;
   double home_lat = 0, home_lon = 0;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -253,10 +255,11 @@ int main(int argc, char **argv) {
     else if (a == "--map") want_map = true;
     else if (a == "--no-map") no_map = true;
     else if (a == "--style" && i + 1 < argc) style = atoi(argv[++i]);
+    else if (a == "--font" && i + 1 < argc) font = argv[++i];
     else if (a == "--live") want_live = true;
     else if (a == "--home" && i + 1 < argc) have_home = sscanf(argv[++i], "%lf,%lf", &home_lat, &home_lon) == 2;
     else {
-      fprintf(stderr, "usage: %s [--port n] [--live --home lat,lon] [--no-map]\n       %s --shot out.bmp [--t ms] [--select n] [--range km] [--map] [--style 0-2]\n", argv[0], argv[0]);
+      fprintf(stderr, "usage: %s [--port n] [--live --home lat,lon] [--no-map]\n       %s --shot out.bmp [--t ms] [--select n] [--range km] [--map] [--style 0-2] [--font id]\n", argv[0], argv[0]);
       return 2;
     }
   }
@@ -271,6 +274,11 @@ int main(int argc, char **argv) {
   if (range > 0) cfg.range_km = range;
   if (style >= 0) cfg.set.map_style = (MapStyle)(style % (int)MapStyle::Count);
   if (no_map) cfg.set.map = false;
+  if (font) {
+    int f = fontIndex(font);
+    if (f < 0) { fprintf(stderr, "no font called %s\n", font); return 2; }
+    cfg.set.font = (uint8_t)f;
+  }
   map_allowed = shot ? want_map : true;
   applyConfig();
 
