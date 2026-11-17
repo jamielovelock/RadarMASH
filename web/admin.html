@@ -20,6 +20,16 @@
   button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:pointer; }
   button.go { background:var(--accent); border-color:var(--accent); color:#fff; }
   small { color:var(--dim); } .hint { margin:6px 0 0; color:var(--dim); font-size:13px; }
+  #pick { position:relative; height:280px; margin:10px 0 6px; border:1px solid var(--line); border-radius:8px; overflow:hidden; background:#aad3df;
+          touch-action:none; cursor:grab; user-select:none; }
+  #pick.drag { cursor:grabbing; } #pick img { position:absolute; width:256px; height:256px; pointer-events:none; }
+  #pick .ring { position:absolute; left:50%; top:50%; border:2px solid #0a8f5b; border-radius:50%; background:rgba(10,143,91,.08); transform:translate(-50%,-50%); pointer-events:none; }
+  #pick .cross { position:absolute; left:50%; top:50%; width:22px; height:22px; margin:-11px 0 0 -11px; pointer-events:none;
+                 background:linear-gradient(#d00,#d00) center/2px 100% no-repeat, linear-gradient(#d00,#d00) center/100% 2px no-repeat; }
+  #pick .zoom { position:absolute; right:8px; top:8px; display:flex; flex-direction:column; gap:4px; }
+  #pick .zoom button { width:30px; padding:2px 0; background:#fff; color:#111; border-color:#999; }
+  #pick .credit { position:absolute; right:0; bottom:0; padding:1px 5px; font-size:11px; background:rgba(255,255,255,.75); color:#222; }
+  #pick .credit a { color:inherit; }
   #saved { float:right; color:var(--accent); opacity:0; transition:opacity .3s; } #saved.on { opacity:1; }
 </style>
 <main>
@@ -33,6 +43,7 @@
     <div class="row"><span>Range</span><select data-k="range_km" data-num>
       <option value="10">10 km</option><option value="20">20 km</option><option value="40">40 km</option><option value="80">80 km</option><option value="160">160 km</option></select>
       <button data-post="/api/press">Next aircraft</button><button data-post="/api/hold">Next range</button></div>
+    <div class="row"><span>Sweep speed</span><input type="range" min="2" max="30" data-k="sweep_seconds"><small data-secs="sweep_seconds"></small></div>
     <div class="checks" id="toggles"></div>
   </section>
 
@@ -41,6 +52,10 @@
     <div class="row"><span>Show</span><select data-k="live" data-bool><option value="false">Demo traffic</option><option value="true">Live aircraft</option></select></div>
     <div class="row"><span>Your position</span><input type="number" step="0.0001" placeholder="latitude" id="lat"><input type="number" step="0.0001" placeholder="longitude" id="lon">
       <button class="go" id="sethome">Set</button><button id="here">Use this browser's location</button></div>
+    <div id="pick"><div class="ring"></div><div class="cross"></div>
+      <div class="zoom"><button type="button" id="zin">+</button><button type="button" id="zout">&minus;</button></div>
+      <div class="credit">&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a></div></div>
+    <p class="hint">Drag the map so the cross sits on the radar's position, then press Set. The circle is the area the radar shows at its current range.</p>
     <p class="hint" id="homehint"></p>
     <div class="row"><span>Data from</span><select data-k="feed_url">
       <option value="https://opendata.adsb.fi/api/v3/lat/{lat}/lon/{lon}/dist/{nm}">adsb.fi</option>
@@ -54,6 +69,7 @@
     <h2>Map</h2>
     <div class="row"><span>Style</span><select data-k="map_style" data-num><option value="0">As the source draws it</option><option value="1">Dark</option><option value="2">Green</option></select></div>
     <div class="row"><span>Brightness</span><input type="range" min="0" max="100" data-k="map_brightness"><small data-show="map_brightness"></small></div>
+    <div class="row"><span>Detail</span><select data-k="map_detail" data-num><option value="0">Normal</option><option value="1">Sharper (smaller place names, slower to load)</option></select></div>
     <div class="row"><span>Source</span><input type="text" data-k="map_url" spellcheck="false"></div>
     <div class="row"><span>Credit shown</span><input type="text" data-k="map_credit" maxlength="27"></div>
     <p class="hint">The source is a tile address with {z}, {x} and {y} in it. The default, OpenStreetMap, needs no key; its credit must stay visible.</p>
@@ -87,8 +103,10 @@ function fill() {
     if (el.type === 'checkbox') el.checked = !!v; else el.value = String(v);
   }
   for (const el of $$('[data-show]')) el.textContent = cfg[el.dataset.show] + '%';
+  for (const el of $$('[data-secs]')) el.textContent = 'once round in ' + cfg[el.dataset.secs] + ' s';
   for (const el of $$('#toggles input')) el.checked = !!cfg[el.name];
   if (document.activeElement !== $('#lat') && document.activeElement !== $('#lon') && cfg.home_set) { $('#lat').value = cfg.home_lat; $('#lon').value = cfg.home_lon; }
+  if (pick.el) pickDraw();
   $('#homehint').textContent = cfg.home_set ? '' : 'No position set yet, so live aircraft cannot be shown. It is stored on the radar only.';
 }
 function build() {
@@ -103,7 +121,11 @@ function build() {
     const read = () => el.type === 'checkbox' ? el.checked : 'bool' in el.dataset ? el.value === 'true'
                      : (el.type === 'number' || el.type === 'range' || 'num' in el.dataset) ? Number(el.value) : el.value;
     el.addEventListener('change', () => send({[k]: read()}));
-    if (el.type === 'range') el.addEventListener('input', () => { const s = $(`[data-show="${k}"]`); if (s) s.textContent = el.value + '%'; });
+    if (el.type === 'range') el.addEventListener('input', () => {
+      const s = $(`[data-show="${k}"]`), t = $(`[data-secs="${k}"]`);
+      if (s) s.textContent = el.value + '%';
+      if (t) t.textContent = 'once round in ' + el.value + ' s';
+    });
   }
   for (const b of $$('[data-post]')) b.onclick = async () => {
     if (b.dataset.confirm && !confirm(b.dataset.confirm)) return;
@@ -115,10 +137,55 @@ function build() {
     send({home_lat: lat, home_lon: lon, live: true});
   };
   $('#here').onclick = () => navigator.geolocation ? navigator.geolocation.getCurrentPosition(
-      p => { $('#lat').value = p.coords.latitude.toFixed(4); $('#lon').value = p.coords.longitude.toFixed(4); },
+      p => { pick.z = Math.max(pick.z, 13); pickMove(p.coords.latitude, p.coords.longitude, true); },
       () => { $('#homehint').textContent = 'The browser would not give a location; type it in instead.'; })
     : ($('#homehint').textContent = 'This browser cannot give a location; type it in instead.');
 }
+// ---- position picker: a small draggable map. The cross in the middle is the position; nothing is saved until Set. ----
+const pick = {lat: 51, lon: -1, z: 9, el: null, tiles: new Map()};
+const mx = (lon, z) => (lon + 180) / 360 * 256 * 2 ** z;
+const my = (lat, z) => { const s = Math.sin(lat * Math.PI / 180); return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * 256 * 2 ** z; };
+const lonOf = (x, z) => x / (256 * 2 ** z) * 360 - 180;
+const latOf = (y, z) => { const n = Math.PI - 2 * Math.PI * y / (256 * 2 ** z); return 180 / Math.PI * Math.atan(Math.sinh(n)); };
+function pickDraw() {
+  const el = pick.el, w = el.clientWidth, h = el.clientHeight, z = pick.z, n = 2 ** z;
+  const cx = mx(pick.lon, z), cy = my(pick.lat, z), keep = new Set();
+  for (let ty = Math.floor((cy - h / 2) / 256); ty <= Math.floor((cy + h / 2) / 256); ty++)
+    for (let tx = Math.floor((cx - w / 2) / 256); tx <= Math.floor((cx + w / 2) / 256); tx++) {
+      if (ty < 0 || ty >= n) continue;
+      const key = z + '/' + ((tx % n + n) % n) + '/' + ty + '@' + tx;
+      keep.add(key);
+      let img = pick.tiles.get(key);
+      if (!img) { img = new Image(); img.alt = ''; img.src = 'https://tile.openstreetmap.org/' + key.split('@')[0] + '.png'; pick.tiles.set(key, img); el.prepend(img); }
+      img.style.left = Math.round(tx * 256 - cx + w / 2) + 'px'; img.style.top = Math.round(ty * 256 - cy + h / 2) + 'px';
+    }
+  for (const [key, img] of pick.tiles) if (!keep.has(key)) { img.remove(); pick.tiles.delete(key); }
+  const mPerPx = 156543.03392 * Math.cos(pick.lat * Math.PI / 180) / n, d = 2 * (cfg.range_km || 40) * 1000 / mPerPx;
+  const ring = el.querySelector('.ring'); ring.style.width = ring.style.height = d + 'px';
+}
+function pickMove(lat, lon, fields) {
+  pick.lat = Math.max(-85, Math.min(85, lat)); pick.lon = ((lon + 540) % 360) - 180;
+  if (fields) { $('#lat').value = pick.lat.toFixed(5); $('#lon').value = pick.lon.toFixed(5); }
+  pickDraw();
+}
+function pickSetup() {
+  const el = pick.el = $('#pick');
+  let from = null;
+  el.addEventListener('pointerdown', e => { if (e.target.closest('button,a')) return; from = {x: e.clientX, y: e.clientY, cx: mx(pick.lon, pick.z), cy: my(pick.lat, pick.z)}; el.setPointerCapture(e.pointerId); el.classList.add('drag'); });
+  el.addEventListener('pointermove', e => { if (from) pickMove(latOf(from.cy - (e.clientY - from.y), pick.z), lonOf(from.cx - (e.clientX - from.x), pick.z), true); });
+  const end = () => { from = null; el.classList.remove('drag'); };
+  el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
+  el.addEventListener('wheel', e => { e.preventDefault(); pick.z = Math.max(3, Math.min(18, pick.z + (e.deltaY < 0 ? 1 : -1))); pickDraw(); }, {passive: false});
+  $('#zin').onclick = () => { pick.z = Math.min(18, pick.z + 1); pickDraw(); };
+  $('#zout').onclick = () => { pick.z = Math.max(3, pick.z - 1); pickDraw(); };
+  for (const id of ['#lat', '#lon']) $(id).addEventListener('input', () => {       // typing moves the map too
+    const lat = Number($('#lat').value), lon = Number($('#lon').value);
+    if ($('#lat').value !== '' && $('#lon').value !== '' && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) pickMove(lat, lon, false);
+  });
+  window.addEventListener('resize', pickDraw);
+  pickMove(cfg.home_lat, cfg.home_lon, false);
+}
+
 async function fonts() {
   try { for (const f of await (await fetch('/api/fonts')).json()) $('#font').add(new Option(f.name, f.id)); } catch (e) {}
 }
@@ -139,6 +206,6 @@ async function status() {
     if (s.range_km && document.activeElement !== $('[data-k="range_km"]')) $('[data-k="range_km"]').value = String(s.range_km);
   } catch (e) { $('#status').textContent = 'not reachable'; }
 }
-(async () => { await fonts(); await load(); build(); fill(); status(); setInterval(status, 3000); })();
+(async () => { await fonts(); await load(); build(); pickSetup(); fill(); status(); setInterval(status, 3000); })();
 </script>
 </html>

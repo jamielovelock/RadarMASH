@@ -90,6 +90,18 @@ TEST(config_only_accepts_real_web_addresses) {
   CHECK(strlen(c.map_credit) == sizeof c.map_credit - 1);
 }
 
+TEST(config_sweep_speed_and_map_detail) {
+  Config c;
+  CHECK(c.set.sweep_seconds == 4 && c.set.map_detail == 0);
+  CHECK(load(c, "{\"sweep_seconds\":12,\"map_detail\":1}"));
+  CHECK(c.set.sweep_seconds == 12 && c.set.map_detail == 1);
+  Config d;
+  std::string text = dump(c);
+  CHECK(configFromJson(text.data(), text.size(), d) && d.set.sweep_seconds == 12 && d.set.map_detail == 1);
+  CHECK(load(c, "{\"sweep_seconds\":0,\"map_detail\":9}"));
+  CHECK(c.set.sweep_seconds == 2 && c.set.map_detail == 1);     // clamped to what the radar can do
+}
+
 TEST(config_font_is_stored_by_name) {
   Config c;
   CHECK(dump(c).find("\"font\":\"classic\"") != std::string::npos);

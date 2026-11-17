@@ -17,8 +17,10 @@ constexpr int MAX_ZOOM = 19;
 double mercatorX(double lon, int zoom);
 double mercatorY(double lat, int zoom);
 
-// The zoom level whose tiles are closest to one tile pixel per screen pixel for this radar range.
-int zoomForRange(double lat, float range_km);
+// The zoom level whose tiles are closest to one tile pixel per screen pixel for this radar range. `detail` adds that
+// many zoom levels: each one doubles the detail drawn (and halves the size of the map's own labels), at four times the
+// tiles to download.
+int zoomForRange(double lat, float range_km, int detail = 0);
 
 // How tile colours are turned into the underlay.
 enum class MapStyle : uint8_t {
@@ -43,6 +45,6 @@ struct MapImage {
 };
 
 // Fill `out` for this home and range. Returns the number of tiles that were missing (their area is left black).
-int composeMap(MapImage &out, TileSource &src, double home_lat, double home_lon, float range_km, MapStyle style);
+int composeMap(MapImage &out, TileSource &src, double home_lat, double home_lon, float range_km, MapStyle style, int detail = 0);
 
 }  // namespace rm

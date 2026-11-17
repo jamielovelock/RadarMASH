@@ -8,7 +8,6 @@
 namespace rm {
 
 static const float PI_F = 3.14159265f;
-static const float SWEEP_PERIOD_MS = 4000.0f;
 static const float TRAIL_DEG = 100.0f;
 static const uint32_t CYCLE_MS = 5000;
 
@@ -103,7 +102,8 @@ void Radar::tick(uint32_t t) {
     a.lat = a.fix_lat + cos(tr) * km / 110.57;
     a.lon = a.fix_lon + sin(tr) * km / kx;
   }
-  sweep_deg = fmodf((float)t, SWEEP_PERIOD_MS) / SWEEP_PERIOD_MS * 360.0f;
+  const uint32_t period = (uint32_t)(set.sweep_seconds < 1 ? 1 : set.sweep_seconds) * 1000u;
+  sweep_deg = (float)(t % period) * 360.0f / (float)period;
   float x, y;
   bool gone = selected >= 0 && (selected >= count || !project(ac[selected], x, y));   // flew out of view
   if (set.auto_cycle && (selected < 0 || gone || t - last_cycle_ms >= CYCLE_MS)) {

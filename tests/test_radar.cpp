@@ -134,6 +134,19 @@ TEST(sweep_turns_once_every_four_seconds) {
   r->tick(7000); CHECK_NEAR(r->sweep_deg, 270, 0.01);
 }
 
+TEST(sweep_speed_can_be_set) {
+  auto r = blankRadar();
+  r->set.sweep_seconds = 10;
+  r->tick(2500); CHECK_NEAR(r->sweep_deg, 90, 0.01);
+  r->tick(12500); CHECK_NEAR(r->sweep_deg, 90, 0.01);
+  r->set.sweep_seconds = 2;
+  r->tick(500); CHECK_NEAR(r->sweep_deg, 90, 0.01);
+  r->set.sweep_seconds = 0;                         // nonsense from a damaged settings file must not divide by zero
+  r->tick(250); CHECK(r->sweep_deg >= 0 && r->sweep_deg < 360);
+  r->set.sweep_seconds = 30;
+  r->tick(4000000000u); CHECK(r->sweep_deg >= 0 && r->sweep_deg < 360);   // late in the 49-day millisecond clock
+}
+
 TEST(auto_cycle_dwells_then_moves_on) {
   auto r = blankRadar();
   r->set.auto_cycle = true;

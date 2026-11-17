@@ -42,6 +42,7 @@ size_t configToJson(const Config &c, char *out, size_t n) {
   o.add("{\"v\":1,");
   for (int i = 0; i < TOGGLE_COUNT; i++) o.add("\"%s\":%s,", TOGGLES[i].name, c.set.*TOGGLES[i].field ? "true" : "false");
   o.add("\"map_style\":%d,\"map_brightness\":%d,\"max_aircraft\":%d,", (int)c.set.map_style, (int)c.set.map_brightness, (int)c.set.max_aircraft);
+  o.add("\"map_detail\":%d,\"sweep_seconds\":%d,", (int)c.set.map_detail, (int)c.set.sweep_seconds);
   o.add("\"home_set\":%s,\"home_lat\":%.5f,\"home_lon\":%.5f,", c.home_set ? "true" : "false", c.home_lat, c.home_lon);
   o.add("\"range_km\":%d,\"live\":%s,\"refresh_s\":%d,\"include_ground\":%s,\"brightness\":%d,", (int)lroundf(c.range_km), c.live ? "true" : "false",
         (int)c.refresh_s, c.include_ground ? "true" : "false", (int)c.brightness);
@@ -86,6 +87,8 @@ bool configFromJson(const char *text, size_t len, Config &c) {
   if (getNum(root, "map_style", 0, (int)MapStyle::Count - 1, d)) c.set.map_style = (MapStyle)(int)d;
   if (getNum(root, "map_brightness", 0, 100, d)) c.set.map_brightness = (uint8_t)d;
   if (getNum(root, "max_aircraft", 1, MAX_AIRCRAFT, d)) c.set.max_aircraft = (uint8_t)d;
+  if (getNum(root, "map_detail", 0, 1, d)) c.set.map_detail = (uint8_t)d;
+  if (getNum(root, "sweep_seconds", 2, 30, d)) c.set.sweep_seconds = (uint8_t)d;
 
   // Home is only taken as a pair, and only if both halves are real coordinates (no clamping: a wrong place is worse
   // than no place).

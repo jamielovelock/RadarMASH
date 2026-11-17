@@ -53,10 +53,10 @@ static std::string map_key;                // what the current picture was built
 static void ensureMap() {
   if (!map_allowed || !radar.set.map) { radar.map = nullptr; return; }
   char k[160];
-  snprintf(k, sizeof k, "%.5f,%.5f,%.1f,%d,", radar.home_lat, radar.home_lon, radar.range_km, (int)radar.set.map_style);
+  snprintf(k, sizeof k, "%.5f,%.5f,%.1f,%d,%d,", radar.home_lat, radar.home_lon, radar.range_km, (int)radar.set.map_style, (int)radar.set.map_detail);
   std::string key = k + tiles.url_template;
   if (key != map_key) {
-    composeMap(map_image, tiles, radar.home_lat, radar.home_lon, radar.range_km, radar.set.map_style);
+    composeMap(map_image, tiles, radar.home_lat, radar.home_lon, radar.range_km, radar.set.map_style, radar.set.map_detail);
     if (map_image.missing == 0) map_key = key;          // otherwise try again on the next frame (failed tiles wait a minute)
   }
   radar.map = &map_image;
@@ -244,6 +244,7 @@ int main(int argc, char **argv) {
   const char *shot = nullptr; uint32_t t = 2600; int select = -1, port = 8360, style = -1; float range = 0;
   bool want_map = false, no_map = false, want_live = false, have_home = false;
   const char *font = nullptr;
+  int detail = -1;
   double home_lat = 0, home_lon = 0;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -256,6 +257,7 @@ int main(int argc, char **argv) {
     else if (a == "--no-map") no_map = true;
     else if (a == "--style" && i + 1 < argc) style = atoi(argv[++i]);
     else if (a == "--font" && i + 1 < argc) font = argv[++i];
+    else if (a == "--detail" && i + 1 < argc) detail = atoi(argv[++i]);
     else if (a == "--live") want_live = true;
     else if (a == "--home" && i + 1 < argc) have_home = sscanf(argv[++i], "%lf,%lf", &home_lat, &home_lon) == 2;
     else {
@@ -274,6 +276,7 @@ int main(int argc, char **argv) {
   if (range > 0) cfg.range_km = range;
   if (style >= 0) cfg.set.map_style = (MapStyle)(style % (int)MapStyle::Count);
   if (no_map) cfg.set.map = false;
+  if (detail >= 0) cfg.set.map_detail = (uint8_t)(detail > 1 ? 1 : detail);
   if (font) {
     int f = fontIndex(font);
     if (f < 0) { fprintf(stderr, "no font called %s\n", font); return 2; }

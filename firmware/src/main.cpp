@@ -327,7 +327,7 @@ static uint32_t map_built_ms = 0;
 static String map_built_for;
 
 struct RawTile { int z, x, y; uint8_t *data; int len; };
-static RawTile raw_tiles[40];
+static RawTile raw_tiles[64];
 static int raw_next = 0;
 
 static int pngLine(PNGDRAW *d) {
@@ -402,12 +402,12 @@ static bool mapSetup() {
 
 // Rebuild the map when home, range, style or source changes, and retry now and then while tiles are missing.
 static void updateMap() {
-  double lat, lon; float range; MapStyle style; bool want;
-  { Lock lock; lat = radar.home_lat; lon = radar.home_lon; range = radar.range_km; style = radar.set.map_style; want = radar.set.map; }
+  double lat, lon; float range; MapStyle style; bool want; int detail;
+  { Lock lock; lat = radar.home_lat; lon = radar.home_lon; range = radar.range_km; style = radar.set.map_style; want = radar.set.map; detail = radar.set.map_detail; }
   if (!want || !mapSetup()) return;
-  String key = String(lat, 4) + "," + String(lon, 4) + "," + String(range, 0) + "," + String((int)style) + "," + map_url;
+  String key = String(lat, 4) + "," + String(lon, 4) + "," + String(range, 0) + "," + String((int)style) + "," + String(detail) + "," + map_url;
   if (key == map_built_for && (map_missing == 0 || millis() - map_built_ms < 60000)) return;   // be gentle on the tile server
-  int missing = composeMap(*map_back, device_tiles, lat, lon, range, style);
+  int missing = composeMap(*map_back, device_tiles, lat, lon, range, style, detail);
   Lock lock;
   MapImage *t = map_front; map_front = map_back; map_back = t;
   map_back->version = map_front->version;           // keep the two counters in step so every rebuild looks new

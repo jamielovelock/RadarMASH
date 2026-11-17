@@ -62,6 +62,24 @@ TEST(zoom_follows_range) {
   CHECK(zoomForRange(51, 0.001f) == MAX_ZOOM);
 }
 
+TEST(extra_detail_uses_a_higher_zoom_and_averages) {
+  CHECK(zoomForRange(51, 40, 1) == zoomForRange(51, 40) + 1);
+  CHECK(zoomForRange(51, 40, 9) == zoomForRange(51, 40) + 2 && zoomForRange(51, 40, -4) == zoomForRange(51, 40));
+  CHECK(zoomForRange(51, 0.001f, 1) == MAX_ZOOM);
+  FakeTiles normal, sharp;
+  auto a = compose(normal);
+  std::unique_ptr<MapImage> b(new MapImage());
+  composeMap(*b, sharp, 51, -1, 40, MapStyle::AsIs, 1);
+  CHECK(b->zoom == a->zoom + 1 && b->missing == 0);
+  CHECK(sharp.asked > normal.asked && sharp.asked <= 36);
+  // twice the zoom: the colour (one step per 16 map pixels) changes twice as fast across the screen
+  int east_a = (red(*a, 244, 180) - red(*a, 180, 180) + 32) % 32, east_b = (red(*b, 244, 180) - red(*b, 180, 180) + 32) % 32;
+  CHECK(east_b >= east_a * 2 - 2 && east_b <= east_a * 2 + 2);
+  FakeTiles white; white.use_flat = true; white.flat = 0xFFFF;
+  composeMap(*b, white, 51, -1, 40, MapStyle::AsIs, 1);
+  CHECK(b->px[180 * SCREEN_W + 180] == 0xFFFF);        // averaging a flat colour gives the same colour
+}
+
 TEST(map_is_north_up_and_east_right) {
   FakeTiles src;
   auto m = compose(src);

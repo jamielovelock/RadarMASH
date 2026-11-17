@@ -58,6 +58,8 @@ struct Settings {
   uint8_t map_brightness = 55;                // percent
   uint8_t max_aircraft = 10;                  // show at most this many, nearest home first (up to MAX_AIRCRAFT)
   uint8_t font = 0;                           // index into FONTS
+  uint8_t map_detail = 0;                     // extra map zoom levels: 0 normal, 1 sharper (smaller labels, more to download)
+  uint8_t sweep_seconds = 4;                  // time for the sweep to go once round
 };
 
 // The on/off switches by name, for settings pages. The simulator and the device both serve these.
