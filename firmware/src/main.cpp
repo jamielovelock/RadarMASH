@@ -1107,12 +1107,18 @@ void loop() {
   drawFrame(!live_mode);
 
   static uint32_t checked_ms = 0, frames_then = 0;
-  static bool is_confirmed = false;
+  static bool is_confirmed = false, armed_for_trial = false;
   if (now - checked_ms > 1000) {                                                      // once a second
     fps = (frames - frames_then) * 1000 / (now - checked_ms); frames_then = frames;
     checked_ms = now; is_confirmed = confirmed();                                     // reads flash, so not every frame
+    const esp_partition_t *bp = esp_ota_get_boot_partition();
+    armed_for_trial = !is_confirmed && bp && bp->address == running_p->address;
     saveConfigIfDue();
   }
-  if (!is_confirmed && now - last_activity_ms > 30UL * 60UL * 1000UL) ESP.restart();   // unconfirmed and left alone: go back
+  // Unconfirmed and left alone: go back to the other firmware. Not while armed for another trial start, though: the
+  // restart would boot this firmware again and re-arm the other one, quietly undoing the arming. (That happened: the
+  // radar was armed for a cold power-on test, sat for half an hour, restarted itself, and the power cycle then went to
+  // the other firmware.)
+  if (!is_confirmed && !armed_for_trial && now - last_activity_ms > 30UL * 60UL * 1000UL) ESP.restart();
   wifiTick(now);
 }
