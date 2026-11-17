@@ -35,6 +35,9 @@ struct Aircraft {
   bool live = false;
   double fix_lat = 0, fix_lon = 0;
   uint32_t fix_ms = 0;
+  // Where this aircraft's label was last put (worked out when drawing; kept so labels do not hop about).
+  mutable uint8_t label_slot = 0;
+  mutable int16_t label_x = 0, label_y = 0;
 };
 
 // Everything a user can switch on or off. The web settings page will read and write this.
@@ -53,6 +56,7 @@ struct Settings {
   bool tag_speed = false;
   bool auto_cycle = true;     // highlight each aircraft in view in turn
   bool card = false;          // large detail card for the highlighted aircraft
+  bool declutter = true;      // move labels so they do not sit on each other, on aircraft or on the tag box
   bool map = true;            // map underlay, when one has been loaded
   MapStyle map_style = MapStyle::Dark;
   uint8_t map_brightness = 55;                // percent
@@ -107,6 +111,9 @@ struct Radar {
   bool project(const Aircraft &a, float &x, float &y) const;   // false if outside the outer ring
 
 private:
+  void layoutLabels() const;                    // decides where every label and the tag box go, once per frame
+  mutable uint32_t layout_key_ = 0;
+  mutable int16_t tag_x_ = 0, tag_y_ = 0, tag_w_ = 0, tag_h_ = 0;
   // kilometres per degree of longitude at home, remembered so the cosine is not recomputed for every point drawn
   mutable double kx_for_lat_ = 1e9;
   mutable float kx_ = 0;

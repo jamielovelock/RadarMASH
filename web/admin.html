@@ -90,7 +90,7 @@
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const NAMES = {sweep:'Sweep', rings:'Range rings', labels:'Callsigns', altitude:'Altitude', trails:'Trails', fade:'Fade after sweep',
   shapes:'Aircraft shapes', auto_cycle:'Cycle through aircraft', tag:'Tag box', tag_route:'Tag: route', tag_type:'Tag: type',
-  tag_level:'Tag: level', tag_speed:'Tag: speed', card:'Large card', map:'Map'};
+  tag_level:'Tag: level', tag_speed:'Tag: speed', card:'Large card', map:'Map', declutter:'Avoid overlapping labels'};
 let cfg = {};
 
 function flash() { const s = $('#saved'); s.classList.add('on'); clearTimeout(flash.t); flash.t = setTimeout(() => s.classList.remove('on'), 900); }

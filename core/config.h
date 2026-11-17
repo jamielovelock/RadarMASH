@@ -43,6 +43,6 @@ bool parseWifiRequest(const char *text, size_t len, char ssid[33], char pass[65]
 // Text made safe to put inside a JSON string (network names can contain anything).
 size_t jsonEscape(const char *in, char *out, size_t out_size);
 
-constexpr size_t CONFIG_JSON_MAX = 1500;   // a buffer this big always fits configToJson
+constexpr size_t CONFIG_JSON_MAX = 1540;   // a buffer this big always fits configToJson
 
 }  // namespace rm

@@ -33,7 +33,7 @@ const Toggle TOGGLES[] = {
   {"shapes", "Aircraft shapes", &Settings::shapes}, {"auto_cycle", "Auto-cycle", &Settings::auto_cycle},
   {"tag", "Tag box", &Settings::tag}, {"tag_route", "Tag: route", &Settings::tag_route}, {"tag_type", "Tag: type", &Settings::tag_type},
   {"tag_level", "Tag: level", &Settings::tag_level}, {"tag_speed", "Tag: speed", &Settings::tag_speed},
-  {"card", "Large card", &Settings::card}, {"map", "Map", &Settings::map},
+  {"card", "Large card", &Settings::card}, {"map", "Map", &Settings::map}, {"declutter", "Avoid overlapping labels", &Settings::declutter},
 };
 const int TOGGLE_COUNT = (int)(sizeof TOGGLES / sizeof TOGGLES[0]);
 
@@ -67,6 +67,7 @@ void Radar::update(Aircraft *fresh, int n, uint32_t t) {
     for (int k = 0; k < count && f.hex[0]; k++)
       if (strcmp(ac[k].hex, f.hex) == 0) { old = &ac[k]; break; }
     if (!old) continue;
+    f.label_slot = old->label_slot;                                  // its label stays where it was
     if (!f.airline[0]) memcpy(f.airline, old->airline, sizeof f.airline);
     if (!f.origin[0]) { memcpy(f.origin, old->origin, sizeof f.origin); memcpy(f.dest, old->dest, sizeof f.dest); }
     // the previous report becomes the newest trail point, unless the aircraft has barely moved
@@ -411,31 +412,104 @@ static float sweepFade(float x, float y, float sweep_deg) {
   return 1.0f - 0.7f * behind / 360.0f;
 }
 
-// Small box beside the highlighted aircraft: callsign, then whichever extra lines the settings ask for.
-static void drawTag(Canvas &c, const Settings &set, const Aircraft &a, float x, float y) {
-  char route[16] = "", data[32] = "";
-  if (set.tag_route && a.origin[0] && a.dest[0]) snprintf(route, sizeof route, "%s>%s", a.origin, a.dest);
+// ---- labels and the tag box ----
+// What the tag box says about an aircraft: its route line and its small data line, either of which may be empty.
+static void tagText(const Settings &set, const Aircraft &a, char *route, size_t rn, char *data, size_t dn) {
+  route[0] = 0; data[0] = 0;
+  if (set.tag_route && a.origin[0] && a.dest[0]) snprintf(route, rn, "%s>%s", a.origin, a.dest);
   int n = 0;
-  if (set.tag_type && a.type[0]) n += snprintf(data + n, sizeof data - n, "%s ", a.type);
-  if (set.tag_level) n += snprintf(data + n, sizeof data - n, "FL%03d ", a.alt_ft / 100);
-  if (set.tag_speed) n += snprintf(data + n, sizeof data - n, "%dkt ", (int)a.speed_kt);
+  if (set.tag_type && a.type[0]) n += snprintf(data + n, dn - n, "%s ", a.type);
+  if (set.tag_level) n += snprintf(data + n, dn - n, "FL%03d ", a.alt_ft / 100);
+  if (set.tag_speed) n += snprintf(data + n, dn - n, "%dkt ", (int)a.speed_kt);
   if (n) data[n - 1] = 0;                                            // drop the trailing space
+}
 
-  const int line = lineHeight(2) + 3, small = lineHeight(1) + 3;    // line spacing follows the chosen font
-  int w = Canvas::textWidth(a.callsign, 2), h = line - 3;
-  if (route[0]) { int rw = Canvas::textWidth(route, 2); if (rw > w) w = rw; h += line; }
-  if (data[0]) { int dw = Canvas::textWidth(data, 1); if (dw > w) w = dw; h += small; }
-  w += 10; h += 8;
+struct Box { int x0, y0, x1, y1; };                                  // x1 and y1 are one past the last pixel
+static inline int overlap(const Box &a, const Box &b) {
+  int w = (a.x1 < b.x1 ? a.x1 : b.x1) - (a.x0 > b.x0 ? a.x0 : b.x0), h = (a.y1 < b.y1 ? a.y1 : b.y1) - (a.y0 > b.y0 ? a.y0 : b.y0);
+  return w > 0 && h > 0 ? w * h : 0;
+}
+static inline bool boxInScope(const Box &b, float margin) {
+  return inScope(b.x0, b.y0, margin) && inScope(b.x1, b.y0, margin) && inScope(b.x0, b.y1, margin) && inScope(b.x1, b.y1, margin);
+}
 
-  // try right, left, below, above; take the first place where the whole box is inside the scope
-  const int gap = 20;
-  const int cand[4][2] = {{(int)x + gap, (int)y - h / 2}, {(int)x - gap - w, (int)y - h / 2},
-                          {(int)x - w / 2, (int)y + gap}, {(int)x - w / 2, (int)y - gap - h}};
-  int bx = cand[0][0], by = cand[0][1];
-  for (int k = 0; k < 4; k++) {
-    int px = cand[k][0], py = cand[k][1];
-    if (inScope(px, py, 3) && inScope(px + w, py, 3) && inScope(px, py + h, 3) && inScope(px + w, py + h, 3)) { bx = px; by = py; break; }
+// Decide where the tag box and every label go. Done once per frame, however many strips the frame is drawn in.
+//  - Every aircraft's icon is somewhere a label may not sit; so is the tag box, placed first.
+//  - Each label then tries six places round its aircraft, starting with where it was last frame so labels stay put
+//    while they can, and takes the first that is on the scope and clear. If none is clear it takes the least bad.
+void Radar::layoutLabels() const {
+  uint32_t key = 2166136261u;
+  auto mixin = [&key](uint32_t v) { key = (key ^ v) * 16777619u; };
+  mixin(now_ms); mixin((uint32_t)count); mixin((uint32_t)selected); mixin((uint32_t)(range_km * 16)); mixin(set.font);
+  mixin((set.labels ? 1u : 0) | (set.altitude ? 2u : 0) | (set.tag ? 4u : 0) | (set.tag_route ? 8u : 0) | (set.tag_type ? 16u : 0) |
+        (set.tag_level ? 32u : 0) | (set.tag_speed ? 64u : 0) | (set.declutter ? 128u : 0));
+  for (int i = 0; i < count; i++) { mixin((uint32_t)(int32_t)(ac[i].lat * 1e5)); mixin((uint32_t)(int32_t)(ac[i].lon * 1e5)); mixin((uint8_t)ac[i].callsign[0]); }
+  if (key == layout_key_) return;                                    // same frame: already done
+  layout_key_ = key;
+
+  setFont(set.font);
+  static Box taken[MAX_AIRCRAFT * 2 + 1];
+  static float sx[MAX_AIRCRAFT], sy[MAX_AIRCRAFT];
+  static bool seen[MAX_AIRCRAFT];
+  int n_taken = 0;
+  for (int i = 0; i < count; i++) {
+    seen[i] = project(ac[i], sx[i], sy[i]);
+    if (seen[i]) taken[n_taken++] = Box{(int)sx[i] - 12, (int)sy[i] - 12, (int)sx[i] + 13, (int)sy[i] + 13};
   }
+
+  tag_w_ = 0;
+  if (selected >= 0 && selected < count && seen[selected] && set.tag) {
+    const Aircraft &a = ac[selected];
+    char route[16], data[32];
+    tagText(set, a, route, sizeof route, data, sizeof data);
+    const int line = lineHeight(2) + 3, small = lineHeight(1) + 3;
+    int w = Canvas::textWidth(a.callsign, 2), h = line - 3;
+    if (route[0]) { int rw = Canvas::textWidth(route, 2); if (rw > w) w = rw; h += line; }
+    if (data[0]) { int dw = Canvas::textWidth(data, 1); if (dw > w) w = dw; h += small; }
+    w += 10; h += 8;
+    const int x = (int)sx[selected], y = (int)sy[selected], gap = 20;
+    const int cand[4][2] = {{x + gap, y - h / 2}, {x - gap - w, y - h / 2}, {x - w / 2, y + gap}, {x - w / 2, y - gap - h}};
+    int bx = cand[0][0], by = cand[0][1];
+    for (int k = 0; k < 4; k++)
+      if (boxInScope(Box{cand[k][0], cand[k][1], cand[k][0] + w, cand[k][1] + h}, 3)) { bx = cand[k][0]; by = cand[k][1]; break; }
+    tag_x_ = (int16_t)bx; tag_y_ = (int16_t)by; tag_w_ = (int16_t)w; tag_h_ = (int16_t)h;
+    taken[n_taken++] = Box{bx - 2, by - 2, bx + w + 2, by + h + 2};
+  }
+
+  const int h2 = lineHeight(2), h = h2 + (set.altitude ? 2 + lineHeight(1) : 0);
+  for (int i = 0; i < count; i++) {
+    const Aircraft &a = ac[i];
+    if (!seen[i] || (i == selected && set.tag)) continue;
+    const int x = (int)sx[i], y = (int)sy[i], w = Canvas::textWidth(a.callsign, 2);
+    // right, left, the four diagonals, then centred below and above (the only places a long label fits at the very
+    // top or bottom of the round screen)
+    const int cand[8][2] = {{x + 16, y - h2}, {x - 16 - w, y - h2}, {x + 6, y - 15 - h}, {x + 6, y + 15}, {x - 6 - w, y - 15 - h}, {x - 6 - w, y + 15},
+                            {x - w / 2, y + 15}, {x - w / 2, y - 15 - h}};
+    int best = -1, best_cost = 0;
+    for (int t = 0; t < 9; t++) {
+      int k = t == 0 ? (a.label_slot < 8 ? a.label_slot : 0) : t - 1;   // first where it was, then each in turn
+      if (t > 0 && k == a.label_slot) continue;
+      Box b{cand[k][0] - 1, cand[k][1] - 1, cand[k][0] + w + 1, cand[k][1] + h + 1};
+      int cost = boxInScope(b, 4) ? 0 : 1000000;                     // off the glass is worse than any overlap
+      if (set.declutter)
+        for (int q = 0; q < n_taken; q++) {
+          if (taken[q].x0 == (int)sx[i] - 12 && taken[q].y0 == (int)sy[i] - 12) continue;   // its own icon
+          cost += overlap(b, taken[q]);
+        }
+      if (best < 0 || cost < best_cost) { best = k; best_cost = cost; }
+      if (cost == 0) break;
+      if (!set.declutter && t >= 2 && best_cost < 1000000) break;    // without tidying: right, else left, unless neither is on the glass
+    }
+    a.label_slot = (uint8_t)best; a.label_x = (int16_t)cand[best][0]; a.label_y = (int16_t)cand[best][1];
+    if (set.labels) taken[n_taken++] = Box{a.label_x, a.label_y, a.label_x + w, a.label_y + h};
+  }
+}
+
+// Small box beside the highlighted aircraft: callsign, then whichever extra lines the settings ask for.
+static void drawTag(Canvas &c, const Settings &set, const Aircraft &a, int bx, int by, int w, int h) {
+  char route[16], data[32];
+  tagText(set, a, route, sizeof route, data, sizeof data);
+  const int line = lineHeight(2) + 3;
   c.blendRect(bx, by, w, h, COL_CARD, 225);
   c.blendRect(bx, by, w, 1, COL_SEL, 255); c.blendRect(bx, by + h - 1, w, 1, COL_SEL, 255);
   c.blendRect(bx, by, 1, h, COL_SEL, 255); c.blendRect(bx + w - 1, by, 1, h, COL_SEL, 255);
@@ -445,7 +519,7 @@ static void drawTag(Canvas &c, const Settings &set, const Aircraft &a, float x, 
   if (data[0]) c.text(bx + 5, ty, data, 1, COL_LABEL);
 }
 
-static void drawAircraft(Canvas &c, const Radar &r, const Aircraft &a, float x, float y, bool sel) {
+static void drawAircraft(Canvas &c, const Radar &r, const Aircraft &a, float x, float y, bool sel, const int16_t *tag) {
   const Settings &set = r.set;
   Color col = sel ? COL_SEL : a.shape == Shape::Military ? COL_MIL : COL_BLIP;
   Color label = COL_LABEL, level = COL_TEXT_DIM;
@@ -459,16 +533,19 @@ static void drawAircraft(Canvas &c, const Radar &r, const Aircraft &a, float x, 
   if (y + 90 < c.y0 || y - 90 >= c.y0 + c.rows) return;
   drawIcon(c, set.shapes ? a.shape : Shape::Unknown, x, y, a.track_deg, col);
   if (sel) c.ring(x, y, 17, COL_SEL);
-  if (sel && set.tag) { drawTag(c, set, a, x, y); return; }
+  if (sel && set.tag && tag[2] > 0) { drawTag(c, set, a, tag[0], tag[1], tag[2], tag[3]); return; }
   if (!set.labels && !sel) return;
-  // label to the right, or to the left when that would run off the scope
-  int w = Canvas::textWidth(a.callsign, 2);
-  int lx = (x + 16 + w < CENTRE + RADAR_RADIUS - 8) ? (int)x + 16 : (int)x - 16 - w;
-  c.text(lx, (int)y - lineHeight(2), a.callsign, 2, sel ? COL_SEL : label);
+  const int h2 = lineHeight(2);
+  if (a.label_slot >= 2) {                                           // moved away from its aircraft: a short tick ties them together
+    float x1 = a.label_x + Canvas::textWidth(a.callsign, 2), y1 = a.label_y + h2 + (set.altitude ? 2 + lineHeight(1) : 0);
+    float lx = x < a.label_x ? a.label_x : x > x1 ? x1 : x, ly = y < a.label_y ? a.label_y : y > y1 ? y1 : y;   // nearest point of the label
+    c.line(x, y, lx, ly, label, 110);
+  }
+  c.text(a.label_x, a.label_y, a.callsign, 2, sel ? COL_SEL : label);
   if (set.altitude) {
     char fl[12];                                                     // room for any int, however odd the data
     snprintf(fl, sizeof fl, "%03d", a.alt_ft / 100);
-    c.text(lx, (int)y + 2, fl, 1, level);
+    c.text(a.label_x, a.label_y + h2 + 2, fl, 1, level);
   }
 }
 
@@ -506,13 +583,15 @@ void Radar::draw(Canvas &c) const {
   c.text((int)CENTRE + 5, (int)(CENTRE - RADAR_RADIUS) + 6, label, 1, COL_TEXT_DIM);
   c.text((int)CENTRE - 11, (int)(CENTRE - RADAR_RADIUS) + 6, "N", 1, COL_TEXT_DIM);
 
+  layoutLabels();
+  const int16_t tag[4] = {tag_x_, tag_y_, tag_w_, tag_h_};
   float x, y;
   for (int i = 0; i < count; i++)
-    if (i != selected && project(ac[i], x, y)) drawAircraft(c, *this, ac[i], x, y, false);
+    if (i != selected && project(ac[i], x, y)) drawAircraft(c, *this, ac[i], x, y, false, tag);
   c.disc(CENTRE, CENTRE, 2.5f, COL_SWEEP);
   if (selected >= 0 && selected < count && project(ac[selected], x, y)) {
     if (set.card) drawCard(c, ac[selected], y > CENTRE);
-    drawAircraft(c, *this, ac[selected], x, y, true);
+    drawAircraft(c, *this, ac[selected], x, y, true, tag);
   }
 }
 

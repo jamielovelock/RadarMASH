@@ -295,16 +295,18 @@ TEST(every_switch_changes_the_picture) {
   demoTraffic(*r, 9000); r->tick(9000);
   r->selected = 0;
   r->set.card = true;                              // so the card switch has something to remove
-  const Pixels base = renderWhole(*r);
+  // Labels stay where they were last put when they can, so start each picture from the same remembered places.
+  auto fresh = [&]() { for (int i = 0; i < r->count; i++) r->ac[i].label_slot = 0; return renderWhole(*r); };
+  const Pixels base = fresh();
   bool Settings::*const switches[] = {&Settings::sweep, &Settings::rings, &Settings::labels, &Settings::altitude, &Settings::trails, &Settings::fade,
                                       &Settings::shapes, &Settings::tag, &Settings::tag_route, &Settings::tag_type,
-                                      &Settings::tag_level, &Settings::tag_speed, &Settings::card};
+                                      &Settings::tag_level, &Settings::tag_speed, &Settings::card, &Settings::declutter};
   for (auto sw : switches) {
     r->set.*sw = !(r->set.*sw);
-    CHECK(renderWhole(*r) != base);
+    CHECK(fresh() != base);
     r->set.*sw = !(r->set.*sw);
   }
-  CHECK(renderWhole(*r) == base);
+  CHECK(fresh() == base);
 }
 
 TEST(radar_draws_the_same_in_strips_with_every_font) {
@@ -322,6 +324,103 @@ TEST(radar_draws_the_same_in_strips_with_every_font) {
       if (f > 0 && sel == 0) CHECK(whole != classic);          // the font really changed the picture
     }
   setFont(0);
+}
+
+// ---- label placement ----
+namespace {
+struct Rect { int x0, y0, x1, y1; };
+Rect labelRect(const Radar &r, int i) {
+  setFont(r.set.font);
+  int w = Canvas::textWidth(r.ac[i].callsign, 2), h = lineHeight(2) + (r.set.altitude ? 2 + lineHeight(1) : 0);
+  return Rect{r.ac[i].label_x, r.ac[i].label_y, r.ac[i].label_x + w, r.ac[i].label_y + h};
+}
+bool touching(const Rect &a, const Rect &b) { return a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1; }
+int overlappingPairs(const Radar &r) {
+  int n = 0;
+  for (int i = 0; i < r.count; i++)
+    for (int k = i + 1; k < r.count; k++) n += touching(labelRect(r, i), labelRect(r, k));
+  return n;
+}
+// Four aircraft bunched within a few kilometres: with labels all to the right they pile up.
+void bunch(Radar &r) {
+  place(r, 0, "RDR4077", 2, 2); place(r, 1, "HWK12", 4, 3); place(r, 2, "KLG5", 3, 0.5); place(r, 3, "MSH432", 5.5, 1.5);
+  for (int i = 0; i < r.count; i++) r.ac[i].shape = Shape::Narrow;
+}
+}  // namespace
+
+TEST(labels_are_moved_apart_when_aircraft_bunch_up) {
+  auto r = blankRadar();
+  bunch(*r);
+  r->set.declutter = false;
+  renderWhole(*r);
+  int untidy = overlappingPairs(*r);
+  CHECK(untidy >= 2);                                  // the problem being solved
+  for (int i = 0; i < r->count; i++) r->ac[i].label_slot = 0;
+  r->set.declutter = true;
+  r->tick(1);
+  renderWhole(*r);
+  CHECK(overlappingPairs(*r) == 0);
+  for (int i = 0; i < r->count; i++) {                 // and no label sits on another aircraft's icon
+    Rect lab = labelRect(*r, i);
+    for (int k = 0; k < r->count; k++) {
+      if (k == i) continue;
+      float x, y; r->project(r->ac[k], x, y);
+      CHECK(!touching(lab, Rect{(int)x - 10, (int)y - 10, (int)x + 10, (int)y + 10}));
+    }
+  }
+}
+
+TEST(labels_stay_on_the_glass) {
+  auto r = blankRadar();
+  const double edge[][2] = {{38, 0}, {-38, 0}, {0, 38}, {0, -38}, {27, 27}, {-27, -27}, {27, -27}, {-27, 27}};
+  int i = 0;
+  for (auto &e : edge) { place(*r, i, "EDGE1234", e[0], e[1]); i++; }
+  renderWhole(*r);
+  for (i = 0; i < r->count; i++) {
+    Rect lab = labelRect(*r, i);
+    const int corners[4][2] = {{lab.x0, lab.y0}, {lab.x1, lab.y0}, {lab.x0, lab.y1}, {lab.x1, lab.y1}};
+    for (auto &c : corners) CHECK(hypot(c[0] - CENTRE, c[1] - CENTRE) <= RADAR_RADIUS);
+  }
+}
+
+TEST(labels_do_not_hop_about) {
+  // A label that had to move stays in its new place while that place is still clear, even if its first choice frees up.
+  auto r = blankRadar();
+  bunch(*r);
+  r->tick(1); renderWhole(*r);
+  uint8_t before[4];
+  bool any_moved = false;
+  for (int i = 0; i < 4; i++) { before[i] = r->ac[i].label_slot; any_moved = any_moved || before[i] != 0; }
+  CHECK(any_moved);
+  for (int step = 2; step < 40; step++) {              // everyone drifts east a little each frame
+    for (int i = 0; i < 4; i++) r->ac[i].lon += 0.0002;
+    r->tick((uint32_t)step); renderWhole(*r);
+    for (int i = 0; i < 4; i++) CHECK(r->ac[i].label_slot == before[i]);
+  }
+  // an update from the feed keeps the places too
+  std::vector<Aircraft> next(r->ac, r->ac + r->count);
+  for (int i = 0; i < 4; i++) snprintf(next[i].hex, sizeof next[i].hex, "h%d", i);
+  for (int i = 0; i < 4; i++) snprintf(r->ac[i].hex, sizeof r->ac[i].hex, "h%d", i);
+  r->update(next.data(), 4, 100);
+  for (int i = 0; i < 4; i++) CHECK(r->ac[i].label_slot == before[i]);
+}
+
+TEST(labels_keep_clear_of_the_tag_box) {
+  auto r = blankRadar();
+  bunch(*r);
+  snprintf(r->ac[0].origin, sizeof r->ac[0].origin, "LHR"); snprintf(r->ac[0].dest, sizeof r->ac[0].dest, "JFK");
+  snprintf(r->ac[0].type, sizeof r->ac[0].type, "B77W");
+  r->selected = 0;
+  r->tick(1);
+  Pixels whole = renderWhole(*r);
+  CHECK(overlappingPairs(*r) <= 1);                    // (the highlighted aircraft's own plain label is not drawn)
+  CHECK(whole == renderInBands(*r, 40));
+  CHECK(whole == renderInBands(*r, 7));
+  // with a full sky in a small space something has to give, but it must still draw the same in strips
+  for (int i = 4; i < 30; i++) { char cs[9]; snprintf(cs, sizeof cs, "PACK%d", i); place(*r, i, cs, (i % 6) * 1.2 - 3, (i / 6) * 1.2 - 3); }
+  r->tick(2);
+  whole = renderWhole(*r);
+  CHECK(whole == renderInBands(*r, 40));
 }
 
 TEST(cached_scope_matches_the_slow_way) {
