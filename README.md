@@ -43,7 +43,10 @@ line; it is not stored in the project.
   serve the same "readsb" format. If one stops answering, the simulator switches to the other. The refresh rate is
   settable; please keep it gentle (the default is every 5 seconds, the minimum 2).
 - **Airline names and routes** come from [adsbdb](https://www.adsbdb.com), looked up a few callsigns at a time and
-  remembered. Routes are what the airline usually flies under that flight number, so they are occasionally wrong.
+  remembered. These services hold what a flight number usually flies, and flight numbers get reused, so some answers
+  are wrong for the aircraft overhead. Each route is therefore checked against where the aircraft is, which way it is
+  heading and whether it is climbing or descending. If it does not fit, or there is none, [hexdb](https://hexdb.io) is
+  asked and held to the same test. A route that fails is not shown: no route is better than a wrong one.
 - Between updates each aircraft is carried on along its track, so it glides rather than jumps.
 - At most 10 aircraft are shown by default, the nearest first; the limit is settable.
 

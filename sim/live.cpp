@@ -103,10 +103,24 @@ void Live::poll() {
   last_count = n; last_ok = (long)time(nullptr); last_error.clear(); failing = 0;
 }
 
+bool Live::airport(const std::string &icao, const std::string &ua, bool verify, Airport &out) {
+  auto hit = airports_.find(icao);
+  if (hit != airports_.end()) { out = hit->second; return out.ok; }
+  std::string url = AIRPORT_HEXDB, body;
+  replaceAll(url, "{icao}", icao);
+  if (!httpGet(url, ua, body, verify)) return false;                    // network trouble: do not remember a failure
+  out.ok = parseHexdbAirport(body.data(), body.size(), out.iata, out.lat, out.lon);
+  airports_[icao] = out;
+  return out.ok;
+}
+
 // Look up a few callsigns per cycle, nearest the top of the list first, so a busy sky fills in over a minute or so
-// without hammering the route service.
+// without hammering the route services. The first service's answer is used if it fits where the aircraft is; if it has
+// none, or one that does not fit, a second service is asked and its answer held to the same test. A route that fails
+// is not shown: no route is better than a wrong one.
 void Live::lookupSome() {
-  std::vector<std::string> todo;
+  struct Want { std::string cs; double lat, lon; float track; int climb; };
+  std::vector<Want> todo;
   std::string tmpl, ua;
   bool verify;
   long now = (long)time(nullptr);
@@ -114,28 +128,50 @@ void Live::lookupSome() {
     std::lock_guard<std::mutex> lock(*mu_);
     tmpl = route_url; ua = user_agent; verify = verify_certs;
     for (int i = 0; i < radar_->count && todo.size() < 3; i++) {
-      const char *cs = radar_->ac[i].callsign;
+      const Aircraft &a = radar_->ac[i];
       float x, y;
-      if (!lookupableCallsign(cs) || !radar_->project(radar_->ac[i], x, y)) continue;
-      auto hit = routes_.find(cs);
+      if (!lookupableCallsign(a.callsign) || !radar_->project(a, x, y)) continue;
+      auto hit = routes_.find(a.callsign);
       if (hit != routes_.end() && (hit->second.known || now - hit->second.when < 1800)) continue;   // retry unknowns after 30 min
-      todo.push_back(cs);
+      todo.push_back(Want{a.callsign, a.lat, a.lon, a.track_deg, a.climb_fpm});
     }
   }
-  for (const std::string &cs : todo) {
+  for (const Want &w : todo) {
     std::string url = tmpl, body;
-    replaceAll(url, "{callsign}", cs);
+    replaceAll(url, "{callsign}", w.cs);
     httpGet(url, ua, body, verify);
     RouteInfo info;
     RouteResult res = parseRoute(body.data(), body.size(), info);
+    if (res == RouteResult::Bad) { std::lock_guard<std::mutex> lock(*mu_); lookups++; continue; }   // network trouble: ask again next cycle
+
+    bool rejected = false, asked_second = false, retry = false;
+    if (res != RouteResult::Found || routeFit(info, w.lat, w.lon, w.track, w.climb) == RouteFit::DoesNotFit) {
+      rejected = res == RouteResult::Found;
+      asked_second = true;
+      info.origin[0] = info.dest[0] = 0; info.have_pos = false;         // keep the airline name, drop the route
+      std::string url2 = ROUTE_HEXDB, body2;
+      replaceAll(url2, "{callsign}", w.cs);
+      char o[5], d[5];
+      if (!httpGet(url2, ua, body2, verify)) retry = true;
+      else if (parseHexdbRoute(body2.data(), body2.size(), o, d)) {
+        Airport ao, ad;
+        RouteInfo second = info;
+        if (airport(o, ua, verify, ao) && airport(d, ua, verify, ad)) {
+          snprintf(second.origin, sizeof second.origin, "%s", ao.iata); snprintf(second.dest, sizeof second.dest, "%s", ad.iata);
+          second.o_lat = ao.lat; second.o_lon = ao.lon; second.d_lat = ad.lat; second.d_lon = ad.lon; second.have_pos = true;
+          if (routeFit(second, w.lat, w.lon, w.track, w.climb) == RouteFit::Fits) info = second;
+        }
+      }
+    }
     std::lock_guard<std::mutex> lock(*mu_);
-    lookups++;
-    if (res == RouteResult::Bad) continue;       // network trouble: ask again next cycle
-    routes_[cs] = Cached{info, res == RouteResult::Found, now};
-    if (res != RouteResult::Found) continue;
+    lookups++; second_opinions += asked_second; routes_rejected += rejected;
+    if (retry) continue;
+    bool anything = info.airline[0] || info.origin[0];
+    routes_[w.cs] = Cached{info, anything, now};
+    if (!anything) continue;
     for (int i = 0; i < radar_->count; i++) {    // show it straight away
       Aircraft &a = radar_->ac[i];
-      if (cs != a.callsign) continue;
+      if (w.cs != a.callsign) continue;
       snprintf(a.airline, sizeof a.airline, "%s", info.airline);
       snprintf(a.origin, sizeof a.origin, "%s", info.origin);
       snprintf(a.dest, sizeof a.dest, "%s", info.dest);

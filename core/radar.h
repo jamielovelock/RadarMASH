@@ -28,6 +28,7 @@ struct Aircraft {
   int alt_ft = 0;
   float track_deg = 0;        // 0 = north, clockwise
   float speed_kt = 0;
+  int16_t climb_fpm = 0;      // feet per minute, negative when descending; 0 if not reported
   float trail_lat[TRAIL_POINTS], trail_lon[TRAIL_POINTS];   // past positions, newest first
   int trail_len = 0;
   bool on_ground = false;

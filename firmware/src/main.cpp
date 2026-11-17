@@ -304,17 +304,37 @@ static void pollFeed() {
   feed_count = n; feed_ok_ms = millis(); feed_failing = 0;
 }
 
+struct AirportEntry { char icao[5], iata[5]; double lat, lon; };
+static AirportEntry airport_cache[24];
+static int airport_next = 0, second_opinions = 0, routes_rejected = 0;
+
+static bool airportInfo(const char *icao, AirportEntry &out) {
+  for (AirportEntry &e : airport_cache) if (e.icao[0] && strcmp(e.icao, icao) == 0) { out = e; return true; }
+  String url = AIRPORT_HEXDB, body;
+  url.replace("{icao}", icao);
+  AirportEntry e = {};
+  if (!httpsGet(url, body) || !parseHexdbAirport(body.c_str(), body.length(), e.iata, e.lat, e.lon)) return false;
+  snprintf(e.icao, sizeof e.icao, "%s", icao);
+  airport_cache[airport_next] = e; airport_next = (airport_next + 1) % (int)(sizeof airport_cache / sizeof airport_cache[0]);
+  out = e;
+  return true;
+}
+
+// One callsign per cycle. The first service's answer is used if it fits where the aircraft is; if it has none, or one
+// that does not fit, a second service is asked and its answer held to the same test. A route that fails is not shown:
+// no route is better than a wrong one.
 static void lookupOneRoute() {
   char cs[9] = "";
+  double lat = 0, lon = 0; float track = 0; int climb = 0;
   {
     Lock lock;
     for (int i = 0; i < radar.count; i++) {
       float x, y;
-      const char *c = radar.ac[i].callsign;
-      if (!lookupableCallsign(c) || !radar.project(radar.ac[i], x, y)) continue;
-      RouteEntry *e = findRoute(c);
+      const Aircraft &a = radar.ac[i];
+      if (!lookupableCallsign(a.callsign) || !radar.project(a, x, y)) continue;
+      RouteEntry *e = findRoute(a.callsign);
       if (e && (e->known || millis() - e->when_ms < 30UL * 60UL * 1000UL)) continue;
-      memcpy(cs, c, sizeof cs);
+      memcpy(cs, a.callsign, sizeof cs); lat = a.lat; lon = a.lon; track = a.track_deg; climb = a.climb_fpm;
       break;
     }
   }
@@ -323,12 +343,34 @@ static void lookupOneRoute() {
   url.replace("{callsign}", cs);
   RouteInfo info;
   RouteResult res = httpsGet(url, body) ? parseRoute(body.c_str(), body.length(), info) : RouteResult::Bad;
+  body = String();
+  if (res == RouteResult::Bad) { Lock lock; lookups++; return; }           // network trouble: ask again next cycle
+
+  bool rejected = false, asked_second = false, retry = false;
+  if (res != RouteResult::Found || routeFit(info, lat, lon, track, climb) == RouteFit::DoesNotFit) {
+    rejected = res == RouteResult::Found;
+    asked_second = true;
+    info.origin[0] = info.dest[0] = 0; info.have_pos = false;              // keep the airline name, drop the route
+    String url2 = ROUTE_HEXDB, body2;
+    url2.replace("{callsign}", cs);
+    char o[5], d[5];
+    if (!httpsGet(url2, body2)) retry = true;
+    else if (parseHexdbRoute(body2.c_str(), body2.length(), o, d)) {
+      AirportEntry ao, ad;
+      if (airportInfo(o, ao) && airportInfo(d, ad)) {
+        RouteInfo second = info;
+        snprintf(second.origin, sizeof second.origin, "%s", ao.iata); snprintf(second.dest, sizeof second.dest, "%s", ad.iata);
+        second.o_lat = ao.lat; second.o_lon = ao.lon; second.d_lat = ad.lat; second.d_lon = ad.lon; second.have_pos = true;
+        if (routeFit(second, lat, lon, track, climb) == RouteFit::Fits) info = second;
+      }
+    }
+  }
   Lock lock;
-  lookups++;
-  if (res == RouteResult::Bad) return;
+  lookups++; second_opinions += asked_second; routes_rejected += rejected;
+  if (retry) return;
   RouteEntry *e = findRoute(cs);
   if (!e) { e = &route_cache[route_next]; route_next = (route_next + 1) % (int)(sizeof route_cache / sizeof route_cache[0]); }
-  memcpy(e->callsign, cs, sizeof e->callsign); e->info = info; e->known = res == RouteResult::Found; e->when_ms = millis();
+  memcpy(e->callsign, cs, sizeof e->callsign); e->info = info; e->known = info.airline[0] || info.origin[0]; e->when_ms = millis();
   if (!e->known) return;
   for (int i = 0; i < radar.count; i++) {
     Aircraft &a = radar.ac[i];
@@ -737,7 +779,7 @@ static void hStatus() {
   j += ",\"running\":\"" + String(running_p->label) + "\",\"running_state\":" + String(runningState());
   j += ",\"boot\":\"" + String(b ? b->label : "?") + "\",\"other\":\"" + String(other_p ? other_p->label : "none") + "\",\"arm_err\":" + String((int)arm_err);
   j += ",\"frame_ms\":" + String(frame_ms) + ",\"frames\":" + String(frames) + ",\"brightness\":" + String(brightness);
-  j += ",\"feed_count\":" + String(feed_count) + ",\"feed_errors\":" + String(feed_errors) + ",\"lookups\":" + String(lookups);
+  j += ",\"feed_count\":" + String(feed_count) + ",\"feed_errors\":" + String(feed_errors) + ",\"lookups\":" + String(lookups) + ",\"second_opinions\":" + String(second_opinions) + ",\"routes_rejected\":" + String(routes_rejected);
   j += ",\"home_set\":" + String(cfg.home_set ? "true" : "false") + ",\"wifi_saved\":" + String(wifi_saved ? "true" : "false");
   j += ",\"wifi\":\"" + String(WiFi.status() == WL_CONNECTED ? net_esc : "") + "\",\"portal\":" + String(portal ? "true" : "false") + ",\"ap\":\"" + String(ap_name) + "\"";
   j += ",\"map\":" + String(radar.map ? "true" : "false") + ",\"map_zoom\":" + String(map_front ? map_front->zoom : -1);

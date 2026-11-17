@@ -179,8 +179,10 @@ static std::string settingsJson() {
 static std::string statusJson() {
   char j[600];
   long age = live.last_ok ? (long)time(nullptr) - live.last_ok : -1;
-  snprintf(j, sizeof j, "{\"device\":false,\"version\":\"simulator\",\"live\":%s,\"aircraft\":%d,\"feed_age_s\":%ld,\"feed_error\":\"%s\",\"map_missing\":%d,\"range_km\":%d}",
-           live.enabled ? "true" : "false", radar.count, age, jsonEscape(live.last_error).c_str(), radar.map ? map_image.missing : 0, (int)radar.range_km);
+  snprintf(j, sizeof j, "{\"device\":false,\"version\":\"simulator\",\"live\":%s,\"aircraft\":%d,\"feed_age_s\":%ld,\"feed_error\":\"%s\",\"map_missing\":%d,\"range_km\":%d,"
+           "\"lookups\":%d,\"second_opinions\":%d,\"routes_rejected\":%d}",
+           live.enabled ? "true" : "false", radar.count, age, jsonEscape(live.last_error).c_str(), radar.map ? map_image.missing : 0, (int)radar.range_km,
+           live.lookups, live.second_opinions, live.routes_rejected);
   return j;
 }
 

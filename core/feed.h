@@ -14,6 +14,9 @@ namespace rm {
 constexpr const char *FEED_ADSB_LOL = "https://api.adsb.lol/v2/point/{lat}/{lon}/{nm}";
 constexpr const char *FEED_ADSB_FI = "https://opendata.adsb.fi/api/v3/lat/{lat}/lon/{lon}/dist/{nm}";
 constexpr const char *ROUTE_ADSBDB = "https://api.adsbdb.com/v0/callsign/{callsign}";
+// A second opinion, asked only when the first has no route or one that does not fit where the aircraft is.
+constexpr const char *ROUTE_HEXDB = "https://hexdb.io/callsign-route?callsign={callsign}";
+constexpr const char *AIRPORT_HEXDB = "https://hexdb.io/api/v1/airport/icao/{icao}";
 
 // Which silhouette suits an aircraft, from the feed's emitter category ("A1".."A7", "B1"..), its ICAO type code and
 // database flags (bit 0 = military). Any of the strings may be empty.
@@ -27,9 +30,22 @@ struct RouteInfo {
   char airline[26] = "";
   char origin[5] = "";
   char dest[5] = "";
+  bool have_pos = false;              // are the two airports' positions known?
+  double o_lat = 0, o_lon = 0, d_lat = 0, d_lon = 0;
 };
 enum class RouteResult { Found, Unknown, Bad };     // Unknown: the service has no route for this callsign. Bad: try again later.
 RouteResult parseRoute(const char *text, size_t len, RouteInfo &out);
+
+// The route services hold what a flight number usually flies, and flight numbers get reused, so some answers are simply
+// wrong for the aircraft overhead. This asks whether a route makes sense for an aircraft at this position on this track:
+// it should be roughly on the way from one airport to the other; when far from both, heading for the destination; and
+// not descending just after its supposed departure or climbing just before its supposed arrival.
+enum class RouteFit { Fits, DoesNotFit, CannotTell };
+RouteFit routeFit(const RouteInfo &r, double lat, double lon, float track_deg, int climb_fpm = 0);
+
+// The second service's replies: a route as "GCRR-EGCC" (ICAO codes, plain text), and an airport as JSON.
+bool parseHexdbRoute(const char *text, size_t len, char origin_icao[5], char dest_icao[5]);
+bool parseHexdbAirport(const char *text, size_t len, char iata[5], double &lat, double &lon);
 
 // True if a callsign is safe and sensible to look up (letters and digits only), so feed data never ends up in a URL raw.
 bool lookupableCallsign(const char *callsign);

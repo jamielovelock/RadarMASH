@@ -198,6 +198,103 @@ TEST(route_lookup_is_read) {
   CHECK(strlen(r.airline) == sizeof r.airline - 1 && strcmp(r.origin, "EGLL") == 0 && r.dest[0] == 0);   // no IATA code: falls back to ICAO
 }
 
+// ---- does a route fit the aircraft? ----
+namespace {
+RouteInfo route(double olat, double olon, double dlat, double dlon) {
+  RouteInfo r; r.have_pos = true; r.o_lat = olat; r.o_lon = olon; r.d_lat = dlat; r.d_lon = dlon; return r;
+}
+const double SKG[2] = {40.5197, 22.9709}, LGW[2] = {51.1481, -0.19028}, ACE[2] = {28.9455, -13.6052}, MAN[2] = {53.3537, -2.27495};
+const double LHR[2] = {51.4706, -0.461941}, JFK[2] = {40.6398, -73.7789};
+}  // namespace
+
+TEST(route_positions_are_read_from_the_first_service) {
+  const char *t = R"({"response":{"flightroute":{"airline":{"name":"Radar Air"},"origin":{"iata_code":"SKG","latitude":40.5197,"longitude":22.9709},
+                      "destination":{"iata_code":"LGW","latitude":51.1481,"longitude":-0.19028}}}})";
+  RouteInfo r;
+  CHECK(parseRoute(t, strlen(t), r) == RouteResult::Found && r.have_pos);
+  CHECK_NEAR(r.o_lat, 40.5197, 1e-6); CHECK_NEAR(r.d_lon, -0.19028, 1e-6);
+  CHECK(parseRoute(ROUTE, strlen(ROUTE), r) == RouteResult::Found && !r.have_pos);   // the older sample has no positions
+  CHECK(routeFit(r, 51, -1, 90) == RouteFit::CannotTell);
+}
+
+TEST(a_wrong_route_is_spotted_from_where_the_aircraft_is) {
+  // The real case: an aircraft arriving at Manchester from the south, which one service had as Thessaloniki to Gatwick.
+  CHECK(routeFit(route(SKG[0], SKG[1], LGW[0], LGW[1]), 53.40, -2.10, 330) == RouteFit::DoesNotFit);
+  CHECK(routeFit(route(ACE[0], ACE[1], MAN[0], MAN[1]), 53.40, -2.10, 330) == RouteFit::Fits);
+  // and from further out: over mid-Wales heading north-east for Manchester
+  CHECK(routeFit(route(ACE[0], ACE[1], MAN[0], MAN[1]), 52.3, -3.6, 40) == RouteFit::Fits);
+  CHECK(routeFit(route(SKG[0], SKG[1], LGW[0], LGW[1]), 52.3, -3.6, 40) == RouteFit::DoesNotFit);
+}
+
+TEST(a_right_route_is_not_rejected) {
+  RouteInfo lhr_jfk = route(LHR[0], LHR[1], JFK[0], JFK[1]);
+  CHECK(routeFit(lhr_jfk, 51.6, -2.5, 280) == RouteFit::Fits);          // climbing out westbound over Bristol
+  CHECK(routeFit(lhr_jfk, 53.5, -20.0, 270) == RouteFit::Fits);         // mid-Atlantic, north of the direct line
+  CHECK(routeFit(lhr_jfk, 51.3, -0.6, 90) == RouteFit::Fits);           // just departed, still pointing the wrong way
+  RouteInfo ace_man = route(ACE[0], ACE[1], MAN[0], MAN[1]);
+  CHECK(routeFit(ace_man, 53.6, -2.6, 140) == RouteFit::Fits);          // being steered round for the approach
+  CHECK(routeFit(route(MAN[0], MAN[1], MAN[0], MAN[1]), 53.5, -2.0, 10) == RouteFit::Fits);   // a local flight out and back
+}
+
+TEST(out_and_back_flights_fit_near_home) {
+  // Real case: a transport on a training flight from and to Brize Norton, 190 km away, was being rejected.
+  RouteInfo bzz = route(51.75, -1.5836, 51.75, -1.5836);
+  CHECK(routeFit(bzz, 53.4, -2.3, 266) == RouteFit::Fits);
+  CHECK(routeFit(bzz, 51.76, -1.6, 90) == RouteFit::Fits);
+  CHECK(routeFit(bzz, 35.0, 20.0, 90) == RouteFit::DoesNotFit);         // but not on the other side of Europe
+}
+
+TEST(climb_and_descent_tell_arrivals_from_departures) {
+  // Real case: a freighter descending eastbound near Manchester. One service said East Midlands to Cologne (it would be
+  // climbing), the other Philadelphia to East Midlands (it would be descending).
+  const double EMA[2] = {52.8311, -1.32806}, CGN[2] = {50.8659, 7.14274}, PHL[2] = {39.8719, -75.2411};
+  RouteInfo dep = route(EMA[0], EMA[1], CGN[0], CGN[1]), arr = route(PHL[0], PHL[1], EMA[0], EMA[1]);
+  CHECK(routeFit(dep, 53.3, -2.0, 93, -1500) == RouteFit::DoesNotFit);
+  CHECK(routeFit(arr, 53.3, -2.0, 93, -1500) == RouteFit::Fits);
+  CHECK(routeFit(dep, 52.9, -1.0, 93, 2000) == RouteFit::Fits);          // and the departure fits when it really is one
+  CHECK(routeFit(arr, 52.9, -1.0, 93, 2000) == RouteFit::DoesNotFit);
+  CHECK(routeFit(dep, 53.3, -2.0, 93, 0) == RouteFit::Fits);             // level, or rate not reported: no opinion
+  CHECK(routeFit(dep, 53.3, -2.0, 93, -300) == RouteFit::Fits);          // a gentle drift down is not a descent
+  RouteInfo hop = route(MAN[0], MAN[1], 54.6575, -6.2158);               // a short hop: up and down are both normal throughout
+  CHECK(routeFit(hop, 53.6, -3.2, 300, -1200) == RouteFit::Fits);
+}
+
+TEST(climb_rate_is_read_from_the_feed) {
+  const char *t = R"({"ac":[{"hex":"a1","flight":"UP1","lat":51,"lon":-1,"alt_baro":9000,"baro_rate":1856},
+                           {"hex":"a2","flight":"DN1","lat":51,"lon":-1,"alt_baro":9000,"geom_rate":-1216},
+                           {"hex":"a3","flight":"LV1","lat":51,"lon":-1,"alt_baro":9000},
+                           {"hex":"a4","flight":"MAD1","lat":51,"lon":-1,"alt_baro":9000,"baro_rate":-9e9}]})";
+  std::vector<Aircraft> ac(8);
+  int n = parseAircraft(t, strlen(t), 51, -1, false, ac.data(), 8);
+  CHECK(n == 4);
+  CHECK(byCallsign(ac, n, "UP1")->climb_fpm == 1856 && byCallsign(ac, n, "DN1")->climb_fpm == -1216);
+  CHECK(byCallsign(ac, n, "LV1")->climb_fpm == 0 && byCallsign(ac, n, "MAD1")->climb_fpm == -30000);
+}
+
+TEST(a_route_pointing_the_other_way_does_not_fit) {
+  RouteInfo lhr_jfk = route(LHR[0], LHR[1], JFK[0], JFK[1]);
+  CHECK(routeFit(lhr_jfk, 53.5, -20.0, 90) == RouteFit::DoesNotFit);    // mid-Atlantic but heading east: it is the return flight
+  CHECK(routeFit(lhr_jfk, 40.0, 10.0, 270) == RouteFit::DoesNotFit);    // over the Mediterranean: nowhere near
+}
+
+TEST(second_service_replies_are_read) {
+  char o[5], d[5];
+  CHECK(parseHexdbRoute("GCRR-EGCC", 9, o, d) && strcmp(o, "GCRR") == 0 && strcmp(d, "EGCC") == 0);
+  CHECK(parseHexdbRoute("GCRR-EGCC\n", 10, o, d) && strcmp(d, "EGCC") == 0);
+  const char *bad[] = {"n/a", "", "GCRR", "GCRR-", "-EGCC", "gcrr-egcc", "GCRR-EGCC-EGLL", "TOOLONG-EGCC", "<html>error</html>", "GC RR-EGCC"};
+  for (const char *b : bad) { CHECK(!parseHexdbRoute(b, strlen(b), o, d)); CHECK(o[0] == 0 && d[0] == 0); }
+
+  const char *ap = R"({"country_code": "GB", "region_name": "England", "iata": "MAN", "icao": "EGCC", "airport": "Manchester Airport", "latitude": 53.3537, "longitude": -2.27495})";
+  char iata[5]; double lat = 0, lon = 0;
+  CHECK(parseHexdbAirport(ap, strlen(ap), iata, lat, lon) && strcmp(iata, "MAN") == 0);
+  CHECK_NEAR(lat, 53.3537, 1e-6); CHECK_NEAR(lon, -2.27495, 1e-6);
+  const char *no_iata = R"({"iata": "", "icao": "EGCB", "latitude": 53.47, "longitude": -2.39})";
+  CHECK(parseHexdbAirport(no_iata, strlen(no_iata), iata, lat, lon) && strcmp(iata, "EGCB") == 0);
+  const char *junk[] = {"", "n/a", "{}", "{\"latitude\": 99, \"longitude\": 0}", "{\"latitude\": \"x\", \"longitude\": 1}", "[1,2]"};
+  for (const char *j : junk) CHECK(!parseHexdbAirport(j, strlen(j), iata, lat, lon));
+  for (size_t cut = 0; cut < strlen(ap); cut++) { std::string part(ap, cut); CHECK(!parseHexdbAirport(part.data(), part.size(), iata, lat, lon)); }
+}
+
 TEST(only_plain_callsigns_are_looked_up) {
   CHECK(lookupableCallsign("RYR239A") && lookupableCallsign("BAW1") && lookupableCallsign("N123AB"));
   CHECK(!lookupableCallsign("G-SWMP") && !lookupableCallsign("") && !lookupableCallsign("AB"));

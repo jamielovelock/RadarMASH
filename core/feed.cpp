@@ -102,6 +102,7 @@ int parseAircraft(const char *text, size_t len, double home_lat, double home_lon
     if (!str(item, "flight", a.callsign, sizeof a.callsign) && !str(item, "r", a.callsign, sizeof a.callsign))
       snprintf(a.callsign, sizeof a.callsign, "%s", a.hex);
     if (num(item, "gs", v)) a.speed_kt = (float)(v < 0 ? 0 : v > 9999 ? 9999 : v);
+    if (num(item, "baro_rate", v) || num(item, "geom_rate", v)) a.climb_fpm = (int16_t)(v < -30000 ? -30000 : v > 30000 ? 30000 : v);
     if (num(item, "track", v) || num(item, "true_heading", v) || num(item, "mag_heading", v)) a.track_deg = (float)fmod(fmod(v, 360.0) + 360.0, 360.0);
     double flags = 0;
     num(item, "dbFlags", flags);
@@ -125,9 +126,80 @@ RouteResult parseRoute(const char *text, size_t len, RouteInfo &out) {
   if (!json::member(resp, "flightroute", route) || !json::isObject(route)) return RouteResult::Unknown;
   out = RouteInfo();
   if (json::member(route, "airline", v)) str(v, "name", out.airline, sizeof out.airline);
-  if (json::member(route, "origin", v) && !str(v, "iata_code", out.origin, sizeof out.origin)) str(v, "icao_code", out.origin, sizeof out.origin);
-  if (json::member(route, "destination", v) && !str(v, "iata_code", out.dest, sizeof out.dest)) str(v, "icao_code", out.dest, sizeof out.dest);
+  bool o_pos = false, d_pos = false;
+  if (json::member(route, "origin", v)) {
+    if (!str(v, "iata_code", out.origin, sizeof out.origin)) str(v, "icao_code", out.origin, sizeof out.origin);
+    o_pos = num(v, "latitude", out.o_lat) && num(v, "longitude", out.o_lon);
+  }
+  if (json::member(route, "destination", v)) {
+    if (!str(v, "iata_code", out.dest, sizeof out.dest)) str(v, "icao_code", out.dest, sizeof out.dest);
+    d_pos = num(v, "latitude", out.d_lat) && num(v, "longitude", out.d_lon);
+  }
+  out.have_pos = o_pos && d_pos;
   return RouteResult::Found;
+}
+
+// Great-circle distance in km, and the initial bearing from one point to another in degrees.
+static double distanceKm(double lat1, double lon1, double lat2, double lon2) {
+  const double R = 6371.0, k = 3.14159265358979 / 180.0;
+  double a = sin((lat2 - lat1) * k / 2), b = sin((lon2 - lon1) * k / 2);
+  double h = a * a + cos(lat1 * k) * cos(lat2 * k) * b * b;
+  return 2 * R * asin(sqrt(h > 1 ? 1 : h));
+}
+static double bearingDeg(double lat1, double lon1, double lat2, double lon2) {
+  const double k = 3.14159265358979 / 180.0;
+  double y = sin((lon2 - lon1) * k) * cos(lat2 * k), x = cos(lat1 * k) * sin(lat2 * k) - sin(lat1 * k) * cos(lat2 * k) * cos((lon2 - lon1) * k);
+  return fmod(atan2(y, x) / k + 360.0, 360.0);
+}
+
+RouteFit routeFit(const RouteInfo &r, double lat, double lon, float track_deg, int climb_fpm) {
+  if (!r.have_pos) return RouteFit::CannotTell;
+  double whole = distanceKm(r.o_lat, r.o_lon, r.d_lat, r.d_lon);
+  double from = distanceKm(r.o_lat, r.o_lon, lat, lon), to = distanceKm(lat, lon, r.d_lat, r.d_lon);
+  // Out and back to the same airport (training, survey, air ambulance): all that can be said is that it should not be
+  // far from home.
+  if (whole < 50.0) return from <= 600.0 ? RouteFit::Fits : RouteFit::DoesNotFit;
+  // Going via the aircraft's position should not add much to the trip. The allowance covers routes that bend round
+  // airspace and aircraft being steered about near an airport.
+  if (from + to > whole * 1.15 + 100.0) return RouteFit::DoesNotFit;
+  // Well away from both airports an aircraft points roughly at where it is going.
+  if (from > 200.0 && to > 200.0) {
+    double off = fabs(bearingDeg(lat, lon, r.d_lat, r.d_lon) - track_deg);
+    if (off > 180) off = 360 - off;
+    if (off > 100) return RouteFit::DoesNotFit;
+  }
+  // Near the start of a long trip an aircraft is climbing, and near the end it is descending. One that is coming down
+  // close to its supposed origin is really arriving from somewhere else (and the reverse).
+  if (from < 250.0 && to > 300.0 && climb_fpm < -600) return RouteFit::DoesNotFit;
+  if (to < 250.0 && from > 300.0 && climb_fpm > 600) return RouteFit::DoesNotFit;
+  return RouteFit::Fits;
+}
+
+static bool icaoCode(const char *s, size_t n, char out[5]) {
+  if (n < 3 || n > 4) return false;
+  for (size_t i = 0; i < n; i++) if (!((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= '0' && s[i] <= '9'))) return false;
+  memcpy(out, s, n); out[n] = 0;
+  return true;
+}
+
+bool parseHexdbRoute(const char *text, size_t len, char origin[5], char dest[5]) {
+  origin[0] = 0; dest[0] = 0;
+  while (len && (text[len - 1] == '\n' || text[len - 1] == '\r' || text[len - 1] == ' ')) len--;
+  const char *dash = (const char *)memchr(text, '-', len);
+  if (!dash) return false;                                              // "n/a" for a callsign it does not know
+  char o[5], d[5];
+  if (!icaoCode(text, (size_t)(dash - text), o) || !icaoCode(dash + 1, len - (size_t)(dash - text) - 1, d)) return false;
+  memcpy(origin, o, 5); memcpy(dest, d, 5);
+  return true;
+}
+
+bool parseHexdbAirport(const char *text, size_t len, char iata[5], double &lat, double &lon) {
+  json::Span root = json::parse(text, len);
+  double la, lo;
+  if (!json::isObject(root) || !num(root, "latitude", la) || !num(root, "longitude", lo) || la < -90 || la > 90 || lo < -180 || lo > 180) return false;
+  if (!str(root, "iata", iata, 5)) str(root, "icao", iata, 5);          // a few airfields have no IATA code
+  lat = la; lon = lo;
+  return true;
 }
 
 bool lookupableCallsign(const char *c) {

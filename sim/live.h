@@ -22,7 +22,7 @@ struct Live {
   // status, for the page
   int last_count = -1;          // aircraft in the last good reply, or -1 before the first
   long last_ok = 0;             // unix time of the last good reply
-  int errors = 0, lookups = 0;
+  int errors = 0, lookups = 0, second_opinions = 0, routes_rejected = 0;
   int failing = 0;              // failed replies in a row
   std::string last_error;
 
@@ -32,6 +32,9 @@ struct Live {
 private:
   struct Cached { rm::RouteInfo info; bool known; long when; };
   std::map<std::string, Cached> routes_;
+  struct Airport { char iata[5]; double lat, lon; bool ok; };
+  std::map<std::string, Airport> airports_;             // looked up for the second opinion, and kept
+  bool airport(const std::string &icao, const std::string &ua, bool verify, Airport &out);
   rm::Radar *radar_ = nullptr;
   std::mutex *mu_ = nullptr;
   uint32_t (*clock_)() = nullptr;
