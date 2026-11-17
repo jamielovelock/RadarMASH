@@ -546,8 +546,14 @@ static void hWifiPortal() {
 static void hWifiPage() { server.send_P(200, "text/html", WIFI_HTML); }
 static void hWifiScan() {
   int n = WiFi.scanComplete();
-  if (n == WIFI_SCAN_FAILED || (server.hasArg("fresh") && n != WIFI_SCAN_RUNNING)) { WiFi.scanDelete(); WiFi.scanNetworks(true); n = WIFI_SCAN_RUNNING; }
-  String j = String("{\"scanning\":") + (n == WIFI_SCAN_RUNNING ? "true" : "false") + ",\"networks\":[";
+  if (n == WIFI_SCAN_FAILED || (server.hasArg("fresh") && n != WIFI_SCAN_RUNNING)) {
+    // The radio will not scan while it is busy trying to join a network, and when the known network is wrong or gone it
+    // is always trying. Stop that first; the retry in wifiTick() starts it again later.
+    if (WiFi.status() != WL_CONNECTED && join_req.state != join_req.JOINING) { esp_wifi_disconnect(); wifi_retry_ms = millis(); }
+    WiFi.scanDelete();
+    n = WiFi.scanNetworks(true) == WIFI_SCAN_FAILED ? WIFI_SCAN_FAILED : WIFI_SCAN_RUNNING;
+  }
+  String j = String("{\"scanning\":") + (n == WIFI_SCAN_RUNNING || n == WIFI_SCAN_FAILED ? "true" : "false") + ",\"networks\":[";   // failed: the page asks again
   int listed = 0;
   for (int i = 0; i < n && listed < 20; i++) {
     String name = WiFi.SSID(i);
