@@ -11,3 +11,4 @@ secrets.h
 .claude/
 build/
 admin_html.h
+wifi_html.h

@@ -122,4 +122,31 @@ bool configFromJson(const char *text, size_t len, Config &c) {
   return true;
 }
 
+bool parseWifiRequest(const char *text, size_t len, char ssid[33], char pass[65]) {
+  ssid[0] = 0; pass[0] = 0;
+  json::Span root = json::parse(text, len), s, p;
+  if (!json::isObject(root) || !json::member(root, "ssid", s)) return false;
+  char name[80], word[140];
+  if (!json::string(s, name, sizeof name)) return false;
+  word[0] = 0;
+  if (json::member(root, "pass", p) && !json::string(p, word, sizeof word)) return false;
+  size_t nl = strlen(name), wl = strlen(word);
+  if (nl < 1 || nl > 32 || !(wl == 0 || (wl >= 8 && wl <= 63))) return false;
+  memcpy(ssid, name, nl + 1); memcpy(pass, word, wl + 1);
+  return true;
+}
+
+size_t jsonEscape(const char *in, char *out, size_t n) {
+  size_t o = 0;
+  if (!n) return 0;
+  for (; *in && o + 2 < n; in++) {
+    unsigned char ch = (unsigned char)*in;
+    if (ch < 32) continue;
+    if (ch == '"' || ch == '\\') out[o++] = '\\';
+    out[o++] = (char)ch;
+  }
+  out[o] = 0;
+  return o;
+}
+
 }  // namespace rm

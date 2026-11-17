@@ -78,6 +78,8 @@
   <section id="device" hidden>
     <h2>Device</h2>
     <div class="row"><span>Firmware</span><span id="fw"></span></div>
+    <div class="row"><span>Wi-Fi</span><span id="net"></span><a href="/wifi">Change Wi-Fi</a></div>
+    <div class="row" id="keeprow" hidden><span>On trial</span><button id="keep">Keep this firmware</button></div>
     <div class="row"><span>Restart</span><button data-post="/api/reboot" data-confirm="Restart the radar?">Restart</button></div>
     <p class="hint" id="bootnote"></p>
   </section>
@@ -130,6 +132,10 @@ function build() {
   for (const b of $$('[data-post]')) b.onclick = async () => {
     if (b.dataset.confirm && !confirm(b.dataset.confirm)) return;
     await fetch(b.dataset.post, {method:'POST'}); setTimeout(load, 400);
+  };
+  $('#keep').onclick = async () => {
+    if (!confirm('Keep this firmware permanently?\n\nAfter this, a restart or power cycle will no longer return to the previous firmware. Only do it once this firmware has been working well on your Wi-Fi.')) return;
+    await fetch('/api/keep', {method:'POST'}); status();
   };
   $('#sethome').onclick = () => {
     const lat = Number($('#lat').value), lon = Number($('#lon').value);
@@ -201,6 +207,8 @@ async function status() {
     if (s.device) {
       $('#device').hidden = false;
       $('#fw').textContent = s.version + (s.confirmed ? '' : ' (on trial)');
+      $('#net').textContent = s.wifi ? s.wifi + ' (' + s.rssi + ' dBm)' : 'not connected';
+      $('#keeprow').hidden = !!s.confirmed;
       $('#bootnote').textContent = s.confirmed ? '' : 'This firmware is on trial: a restart or power cycle returns to the previous firmware.';
     }
     if (s.range_km && document.activeElement !== $('[data-k="range_km"]')) $('[data-k="range_km"]').value = String(s.range_km);

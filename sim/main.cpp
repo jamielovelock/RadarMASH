@@ -11,6 +11,7 @@
 #include "../core/config.h"
 #include "../core/radar.h"
 #include "admin_html.h"
+#include "wifi_html.h"
 #include "live.h"
 #include "tiles.h"
 #include <arpa/inet.h>
@@ -37,6 +38,9 @@ static std::mutex radar_mu;                // the live-data thread and the web r
 static Config cfg;                         // what the settings page shows and what is saved
 static Live live;
 static ScopeCache scope_cache;             // the same speed-up the device uses, so the simulator shows the same picture
+static std::string fake_wifi_ssid;         // stand-ins for the device's Wi-Fi setup, so that page can be developed here
+static bool fake_wifi_ok = false;
+static time_t fake_wifi_at = 0;
 static bool save_settings = false;         // only when serving; still frames never touch the saved file
 
 static uint32_t nowMs() {
@@ -233,6 +237,23 @@ static int serve(int port) {
       else if (path == "/api/press" && post) { radar.shortPress(); respondText(fd, "ok"); }
       else if (path == "/api/hold" && post) { radar.longPress(); cfg.range_km = radar.range_km; saveConfig(); respondText(fd, "ok"); }
       else if (path == "/api/reboot" && post) respondText(fd, "ok");            // nothing to restart here
+      // The simulator has no Wi-Fi to set up; these stand in for the device so the setup page can be worked on here.
+      // Any password joins, except "wrongpass", which fails the way a bad password does.
+      else if (path == "/wifi") respond(fd, "text/html", WIFI_HTML, sizeof WIFI_HTML - 1);
+      else if (path.rfind("/api/wifi/scan", 0) == 0)
+        respondText(fd, "{\"scanning\":false,\"networks\":[{\"ssid\":\"Swamp 4077\",\"rssi\":-48,\"secure\":true},{\"ssid\":\"Rosie's Bar\",\"rssi\":-71,\"secure\":false},"
+                        "{\"ssid\":\"Officers \\\"Club\\\"\",\"rssi\":-83,\"secure\":true}]}", "application/json");
+      else if (path == "/api/wifi" && post) {
+        char ssid[33], pass[65];
+        if (!parseWifiRequest(body.data(), body.size(), ssid, pass)) respondText(fd, "{\"error\":\"bad request\"}", "application/json", 400);
+        else { fake_wifi_ssid = ssid; fake_wifi_ok = strcmp(pass, "wrongpass") != 0; fake_wifi_at = time(nullptr); respondText(fd, "{\"ok\":true}", "application/json"); }
+      }
+      else if (path == "/api/wifi/status") {
+        char esc[80]; jsonEscape(fake_wifi_ssid.c_str(), esc, sizeof esc);
+        bool pending = time(nullptr) - fake_wifi_at < 3;
+        std::string st = fake_wifi_ssid.empty() ? "idle" : pending ? "joining" : fake_wifi_ok ? "joined" : "failed";
+        respondText(fd, std::string("{\"state\":\"") + st + "\",\"ssid\":\"" + esc + "\",\"ip\":\"192.168.1.77\",\"kept\":\"Swamp 4077\"}", "application/json");
+      }
       else if (path == "/") respond(fd, "text/html", PAGE, sizeof PAGE - 1);
       else respondText(fd, "not found", "text/plain", 404);
     }

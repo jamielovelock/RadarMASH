@@ -4,8 +4,8 @@ Open firmware for the GeekMagic Radar 360 (model `radar21en`): a 2.1" round, 360
 around you. Named in honour of Radar O'Reilly, who always heard the choppers first.
 
 **Status: early development.** The simulator is the easy way to try it. The device firmware is a development build that
-boots, shows live aircraft over the map and remembers its settings, but it has no Wi-Fi setup screen yet and is not
-ready for general use.
+boots, shows live aircraft over the map and remembers its settings. Its Wi-Fi setup hotspot is new and not yet proven
+end to end, so it is not ready for general use.
 
 ## Layout
 
@@ -71,8 +71,10 @@ replaced. The firmware is written around that:
 - Its own updater writes only the other slot, and confirms itself first so a failed upload never leaves nothing bootable.
 - Only ever upload the app image. Never write a bootloader, partition table or "factory" image.
 
-To build: copy `firmware/include/secrets.example.h` to `secrets.h`, fill in your Wi-Fi details, and run
-`firmware/build.sh` (needs PlatformIO). That produces `radarmash-radar21en.bin`, which the stock firmware's updater
+To build, run `firmware/build.sh` (needs PlatformIO). No Wi-Fi details are compiled in: the firmware joins the network
+the device already knows, and otherwise puts up a hotspot called `RadarMASH-xxxx`; join it and the setup page appears
+(or open http://192.168.4.1). New details are only stored once they have worked. Over that hotspot only the setup page
+can be reached, never the settings or the updater. That produces `radarmash-radar21en.bin`, which the stock firmware's updater
 accepts: `curl -H 'Content-Type: application/octet-stream' --data-binary @radarmash-radar21en.bin http://DEVICE/api/ota`.
 Stock refuses uploads for about a minute after it boots. The device then serves the settings page at its address.
 Settings, including where the radar is, are stored on the device only.

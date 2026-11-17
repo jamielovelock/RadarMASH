@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RadarMASH Wi-Fi setup</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f4f5f7; --card:#fff; --ink:#1c1f24; --dim:#6b7280; --line:#d9dce1; --accent:#0a8f5b; --bad:#c0392b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14161a; --card:#1e2126; --ink:#e6e8eb; --dim:#9aa1ab; --line:#33383f; --accent:#35c98a; --bad:#ff7b6b; } }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--ink); font:16px/1.45 system-ui,sans-serif; }
+  main { max-width:30em; margin:0 auto; } h1 { font-size:20px; margin:4px 0 12px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin:0 0 14px; }
+  label { display:block; margin:10px 0 4px; color:var(--dim); font-size:14px; }
+  input[type=text], input[type=password] { box-sizing:border-box; width:100%; font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px 10px; }
+  button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px 14px; cursor:pointer; }
+  button.go { background:var(--accent); border-color:var(--accent); color:#fff; margin-top:14px; } button:disabled { opacity:.5; }
+  ul { list-style:none; margin:8px 0 0; padding:0; max-height:15em; overflow:auto; }
+  li { display:flex; justify-content:space-between; gap:10px; padding:9px 4px; border-top:1px solid var(--line); cursor:pointer; }
+  li small { color:var(--dim); white-space:nowrap; } .hint { color:var(--dim); font-size:14px; margin:8px 0 0; }
+  #msg { min-height:1.5em; margin:12px 0 0; } #msg.bad { color:var(--bad); } #msg.good { color:var(--accent); }
+  .row { display:flex; align-items:center; gap:8px; margin-top:6px; color:var(--dim); font-size:14px; }
+</style>
+<main>
+  <h1>RadarMASH Wi-Fi setup</h1>
+  <section>
+    <div style="display:flex;justify-content:space-between;align-items:center"><strong>Networks nearby</strong><button id="rescan">Look again</button></div>
+    <ul id="nets"><li><span>Looking…</span></li></ul>
+  </section>
+  <section>
+    <label for="ssid">Network name</label><input type="text" id="ssid" maxlength="32" autocapitalize="none" autocorrect="off" spellcheck="false">
+    <label for="pass">Password</label><input type="password" id="pass" maxlength="63" autocomplete="off">
+    <div class="row"><input type="checkbox" id="show"><label for="show" style="margin:0">show password</label></div>
+    <button class="go" id="join">Join</button>
+    <p id="msg"></p>
+    <p class="hint">The password is stored on the radar only. Networks on 2.4 GHz only: the radar cannot see 5 GHz ones.</p>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const bars = r => r > -55 ? 'strong' : r > -70 ? 'good' : r > -80 ? 'weak' : 'very weak';
+function say(text, cls) { const m = $('#msg'); m.textContent = text; m.className = cls || ''; }
+async function scan() {
+  try {
+    const j = await (await fetch('/api/wifi/scan')).json(), ul = $('#nets');
+    if (j.scanning && !j.networks.length) { setTimeout(scan, 1500); return; }
+    ul.textContent = '';
+    if (!j.networks.length) { const li = document.createElement('li'); li.textContent = 'None found. Type the name below.'; ul.append(li); }
+    for (const n of j.networks) {
+      const li = document.createElement('li'), a = document.createElement('span'), b = document.createElement('small');
+      a.textContent = n.ssid; b.textContent = (n.secure ? '' : 'open, ') + bars(n.rssi);
+      li.append(a, b); li.onclick = () => { $('#ssid').value = n.ssid; $('#pass').focus(); };
+      ul.append(li);
+    }
+    if (j.scanning) setTimeout(scan, 2000);
+  } catch (e) { setTimeout(scan, 3000); }
+}
+async function watch() {
+  try {
+    const s = await (await fetch('/api/wifi/status')).json();
+    if (s.state === 'joining') { say('Joining ' + s.ssid + '…'); setTimeout(watch, 1500); return; }
+    $('#join').disabled = false;
+    if (s.state === 'joined') say('Joined ' + s.ssid + '. The radar is now at http://' + s.ip + '/ (or http://radarmash.local/). Put this phone or computer back on that network to reach it.', 'good');
+    else if (s.state === 'failed') say('Could not join ' + s.ssid + '. Check the password and try again.' + (s.kept ? ' The radar has gone back to ' + s.kept + '.' : ''), 'bad');
+  } catch (e) { setTimeout(watch, 2000); }   // the radar changes channel while joining, which can drop this page for a moment
+}
+$('#show').onchange = e => { $('#pass').type = e.target.checked ? 'text' : 'password'; };
+$('#rescan').onclick = () => { $('#nets').innerHTML = '<li><span>Looking…</span></li>'; fetch('/api/wifi/scan?fresh=1').then(scan, scan); };
+$('#join').onclick = async () => {
+  const ssid = $('#ssid').value, pass = $('#pass').value;
+  if (!ssid) { say('Choose or type a network name.', 'bad'); return; }
+  if (pass.length && pass.length < 8) { say('Wi-Fi passwords are at least 8 characters.', 'bad'); return; }
+  $('#join').disabled = true; say('Joining ' + ssid + '…');
+  try {
+    const r = await fetch('/api/wifi', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ssid, pass})});
+    if (!r.ok) { say('The radar did not accept that. Check the name and password.', 'bad'); $('#join').disabled = false; return; }
+  } catch (e) {}
+  setTimeout(watch, 1500);
+};
+scan();
+</script>
+</html>

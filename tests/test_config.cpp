@@ -128,3 +128,33 @@ TEST(config_json_fits_its_buffer) {
   CHECK(configToJson(c, tiny, sizeof tiny) == 0 && tiny[0] == 0);   // too small: says so, writes nothing misleading
   CHECK(configToJson(c, nullptr, 0) == 0);
 }
+
+TEST(wifi_request_is_checked) {
+  char ssid[33], pass[65];
+  const char *good = "{\"ssid\":\"Home Network\",\"pass\":\"correct horse\"}";
+  CHECK(parseWifiRequest(good, strlen(good), ssid, pass));
+  CHECK(strcmp(ssid, "Home Network") == 0 && strcmp(pass, "correct horse") == 0);
+  const char *open = "{\"ssid\":\"Cafe\"}";
+  CHECK(parseWifiRequest(open, strlen(open), ssid, pass) && pass[0] == 0);
+  const char *quoted = "{\"ssid\":\"Bob\\\"s \\\\ net\",\"pass\":\"\"}";
+  CHECK(parseWifiRequest(quoted, strlen(quoted), ssid, pass) && strcmp(ssid, "Bob\"s \\ net") == 0);
+  const char *bad[] = {"", "[]", "{\"pass\":\"12345678\"}", "{\"ssid\":\"\"}", "{\"ssid\":\"x\",\"pass\":\"short\"}",
+                       "{\"ssid\":\"this network name is far too long to be real\"}", "{\"ssid\":5}", "{\"ssid\":\"x\",\"pass\":12345678}",
+                       "{\"ssid\":\"x\",\"pass\":\"0123456789012345678901234567890123456789012345678901234567890123\"}"};
+  for (const char *b : bad) {
+    snprintf(ssid, sizeof ssid, "stale"); snprintf(pass, sizeof pass, "stale");
+    CHECK(!parseWifiRequest(b, strlen(b), ssid, pass));
+    CHECK(ssid[0] == 0 && pass[0] == 0);                 // a refused request leaves nothing behind
+  }
+}
+
+TEST(network_names_are_escaped_for_json) {
+  char out[64];
+  CHECK(jsonEscape("plain", out, sizeof out) == 5 && strcmp(out, "plain") == 0);
+  jsonEscape("a\"b\\c\nd", out, sizeof out);
+  CHECK(strcmp(out, "a\\\"b\\\\cd") == 0);
+  char tiny[5];
+  jsonEscape("\"\"\"\"\"\"", tiny, sizeof tiny);
+  CHECK(strlen(tiny) < sizeof tiny && strlen(tiny) % 2 == 0);    // never cut in the middle of an escape
+  CHECK(jsonEscape("x", out, 0) == 0);
+}

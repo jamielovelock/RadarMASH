@@ -9,9 +9,14 @@
 //  - Unconfirmed and left alone for 30 minutes, it restarts (back to the other slot).
 //  - /ota writes only the other slot. Before erasing it, this image confirms itself: by then it has joined Wi-Fi and is
 //    receiving the upload, and a half-written slot must never be the only thing left. /ota/dry receives without writing.
+//  - Wi-Fi: it joins the network the device already knows. If it cannot, it puts up its own setup hotspot (and keeps
+//    retrying the known network). Requests arriving over that open hotspot can only reach the Wi-Fi setup page, never
+//    the settings or the updater.
 //  - The map and the fast drawing path live in the external memory (PSRAM). If that is ever missing the radar still runs,
 //    more slowly and without a map.
 #include <Arduino.h>
+#include <DNSServer.h>
+#include <ESPmDNS.h>
 #include <HTTPClient.h>
 #include <PNGdec.h>
 #include <Preferences.h>
@@ -22,6 +27,7 @@
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <esp_psram.h>
+#include <esp_mac.h>
 #include <esp_wifi.h>
 #include <mbedtls/sha256.h>
 
@@ -30,7 +36,10 @@
 #include "feed.h"
 #include "panel_init.h"
 #include "radar.h"
-#include "secrets.h"
+#include "wifi_html.h"
+#if __has_include("secrets.h")
+#include "secrets.h"                                 // optional: Wi-Fi details for a development build
+#endif
 
 #define FW_VERSION "0.1.0-dev"
 #define USER_AGENT "RadarMASH/" FW_VERSION
@@ -51,10 +60,11 @@ struct Lock { Lock() { xSemaphoreTake(radar_mu, portMAX_DELAY); } ~Lock() { xSem
 
 static const esp_partition_t *running_p = nullptr, *other_p = nullptr;
 static esp_err_t arm_err = -1;
-static uint32_t last_activity_ms = 0, wifi_lost_ms = 0;
+static uint32_t last_activity_ms = 0;
+static void touch();                                // marks deliberate use of the device (defined with the web handlers)
 static uint32_t frame_ms = 0, frames = 0;
 static int brightness = 1023;
-static char boot_note[40] = "";
+static char boot_note[40] = "", note2[34] = "", note3[34] = "";   // up to three lines of message over the radar
 
 // True only if the external memory chip really answered and is usable as heap (the Arduino flag alone is not proof).
 static bool psramOk() { return esp_psram_is_initialized() && heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0; }
@@ -196,7 +206,13 @@ static void drawFrame(bool demo) {
     uint32_t t = micros();
     Canvas c(strips[buf], y0, BAND_ROWS);
     radar.draw(c);
-    if (boot_note[0]) c.textCentred(180, 300, boot_note, 2, rgb(255, 240, 80));
+    if (boot_note[0]) {
+      int lines = 1 + (note2[0] ? 1 : 0) + (note3[0] ? 1 : 0), top = 300 - (lines - 1) * 22;
+      c.blendRect(0, top - 8, SCREEN_W, lines * 22 + 12, rgb(0, 14, 8), 225);
+      c.textCentred(180, top, boot_note, 2, rgb(255, 240, 80));
+      if (note2[0]) c.textCentred(180, top + 22, note2, 2, rgb(230, 230, 230));
+      if (note3[0]) c.textCentred(180, top + 44, note3, 2, rgb(230, 230, 230));
+    }
     perf_draw_us += micros() - t;
     StripJob job{buf, (int16_t)y0, y0 + BAND_ROWS >= SCREEN_H};
     xQueueSend(work_q, &job, portMAX_DELAY);
@@ -428,6 +444,150 @@ static void feedTask(void *) {
   }
 }
 
+// ---- Wi-Fi ----
+static DNSServer dns;
+static bool portal = false, mdns_up = false;
+static char ap_name[24] = "RadarMASH-setup";
+static uint32_t wifi_ok_since = 0, wifi_lost_since = 0, wifi_retry_ms = 0, portal_hold_until = 0;
+static int scan_wait = 0;
+static struct {
+  enum State { IDLE, JOINING, JOINED, FAILED } state = IDLE;
+  char ssid[33] = "", kept[33] = "";
+  uint32_t started = 0;
+  wifi_config_t old, wanted;                        // what to go back to if the new details do not work, and the new details
+  bool had_old = false;
+} join_req;
+
+// New Wi-Fi details are tried from memory only. They are written to the device's store only once they have worked, so
+// a wrong password or a mistyped name can never replace details that do work. (An earlier version stored first and
+// tried to put the old ones back on failure; the put-back was refused while the radio was busy, and the radar was left
+// knowing only the bad details.)
+static void tryWifi(const wifi_config_t &c, bool remember) {
+  esp_wifi_disconnect();
+  esp_wifi_set_storage(remember ? WIFI_STORAGE_FLASH : WIFI_STORAGE_RAM);
+  wifi_config_t copy = c;
+  esp_wifi_set_config(WIFI_IF_STA, &copy);
+  esp_wifi_connect();
+}
+
+static bool savedWifi(char *ssid_out) {             // does the device already know a network?
+  wifi_config_t wc = {};
+  if (esp_wifi_get_config(WIFI_IF_STA, &wc) != ESP_OK || !wc.sta.ssid[0]) return false;
+  if (ssid_out) { memcpy(ssid_out, wc.sta.ssid, 32); ssid_out[32] = 0; }
+  return true;
+}
+
+static void startPortal() {
+  if (portal) return;
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(ap_name);                             // open, so it can be joined from any phone; see viaSetupAp()
+  delay(100);
+  dns.start(53, "*", WiFi.softAPIP());              // every name resolves here, which makes phones pop the page up
+  portal = true;
+  snprintf(boot_note, sizeof boot_note, "Wi-Fi setup");
+  snprintf(note2, sizeof note2, "join %s", ap_name);
+  snprintf(note3, sizeof note3, "then open 192.168.4.1");
+}
+static void stopPortal() {
+  if (!portal) return;
+  dns.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  portal = false;
+  boot_note[0] = note2[0] = note3[0] = 0;
+}
+// True for a request that came in over the setup hotspot rather than the home network.
+static bool viaSetupAp() { return portal && server.client().localIP() == WiFi.softAPIP(); }
+
+static void wifiTick(uint32_t now) {
+  bool up = WiFi.status() == WL_CONNECTED;
+  if (portal) dns.processNextRequest();
+  if (up) {
+    if (!wifi_ok_since) wifi_ok_since = now | 1;
+    wifi_lost_since = 0;
+    if (!mdns_up) mdns_up = MDNS.begin("radarmash");                      // reachable as radarmash.local
+  } else {
+    if (!wifi_lost_since) wifi_lost_since = now | 1;
+    wifi_ok_since = 0;
+  }
+  if (join_req.state == join_req.JOINING) {
+    if (up) {
+      join_req.state = join_req.JOINED;
+      esp_wifi_set_storage(WIFI_STORAGE_FLASH);                            // it works: now remember it
+      esp_wifi_set_config(WIFI_IF_STA, &join_req.wanted);
+      memset(&join_req.wanted, 0, sizeof join_req.wanted);
+    } else if (now - join_req.started > 20000) {
+      join_req.state = join_req.FAILED;
+      memset(&join_req.wanted, 0, sizeof join_req.wanted);
+      if (join_req.had_old) tryWifi(join_req.old, true);                   // back to what worked (still in the store, untouched)
+      else { esp_wifi_disconnect(); esp_wifi_set_storage(WIFI_STORAGE_FLASH); }
+      wifi_retry_ms = now;
+    }
+    return;
+  }
+  if (portal && up && now - wifi_ok_since > 45000 && (int32_t)(now - portal_hold_until) > 0) stopPortal();   // joined; the page has had time to say so
+  if (!portal && !up && now - wifi_lost_since > 60000) startPortal();      // the network has gone: offer setup, keep trying
+  if (portal && !up && WiFi.softAPgetStationNum() == 0 && now - wifi_retry_ms > 30000) {
+    wifi_retry_ms = now;                                                   // nobody is using the hotspot: try the known network
+    wifi_config_t known = {};
+    esp_wifi_set_storage(WIFI_STORAGE_FLASH);
+    if (join_req.had_old) tryWifi(join_req.old, true);
+    else if (esp_wifi_get_config(WIFI_IF_STA, &known) == ESP_OK && known.sta.ssid[0]) esp_wifi_connect();
+  }
+}
+
+// Put the setup hotspot up for five minutes while still on the home network, to try the setup page from a phone.
+static void hWifiPortal() {
+  touch();
+  portal_hold_until = millis() + 5UL * 60UL * 1000UL;
+  startPortal();
+  server.send(200, "application/json", String("{\"ap\":\"") + ap_name + "\",\"minutes\":5}");
+}
+static void hWifiPage() { server.send_P(200, "text/html", WIFI_HTML); }
+static void hWifiScan() {
+  int n = WiFi.scanComplete();
+  if (n == WIFI_SCAN_FAILED || (server.hasArg("fresh") && n != WIFI_SCAN_RUNNING)) { WiFi.scanDelete(); WiFi.scanNetworks(true); n = WIFI_SCAN_RUNNING; }
+  String j = String("{\"scanning\":") + (n == WIFI_SCAN_RUNNING ? "true" : "false") + ",\"networks\":[";
+  int listed = 0;
+  for (int i = 0; i < n && listed < 20; i++) {
+    String name = WiFi.SSID(i);
+    if (!name.length()) continue;                                          // hidden networks have no name to show
+    bool stronger = false;
+    for (int k = 0; k < n; k++)                                            // one entry per name: the strongest
+      if (k != i && WiFi.SSID(k) == name && (WiFi.RSSI(k) > WiFi.RSSI(i) || (WiFi.RSSI(k) == WiFi.RSSI(i) && k < i))) stronger = true;
+    if (stronger) continue;
+    char esc[80];
+    jsonEscape(name.c_str(), esc, sizeof esc);
+    j += String(listed++ ? "," : "") + "{\"ssid\":\"" + esc + "\",\"rssi\":" + String(WiFi.RSSI(i)) + ",\"secure\":" + (WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "false" : "true") + "}";
+  }
+  server.send(200, "application/json", j + "]}");
+}
+static void hWifiJoin() {
+  touch();
+  String body = server.arg("plain");
+  char ssid[33], pass[65];
+  if (!parseWifiRequest(body.c_str(), body.length(), ssid, pass)) { server.send(400, "application/json", "{\"error\":\"bad request\"}"); return; }
+  join_req.had_old = esp_wifi_get_config(WIFI_IF_STA, &join_req.old) == ESP_OK && join_req.old.sta.ssid[0] != 0;
+  join_req.kept[0] = 0;
+  if (join_req.had_old) { memcpy(join_req.kept, join_req.old.sta.ssid, 32); join_req.kept[32] = 0; }
+  memcpy(join_req.ssid, ssid, sizeof join_req.ssid);
+  join_req.started = millis(); join_req.state = join_req.JOINING;
+  memset(&join_req.wanted, 0, sizeof join_req.wanted);
+  memcpy(join_req.wanted.sta.ssid, ssid, strlen(ssid));
+  memcpy(join_req.wanted.sta.password, pass, strlen(pass));
+  memset(pass, 0, sizeof pass);
+  server.send(200, "application/json", "{\"ok\":true}");
+  delay(100);                                                              // let the reply out before the radio moves
+  tryWifi(join_req.wanted, false);                                         // from memory only, until it has worked
+}
+static void hWifiStatus() {
+  static const char *names[] = {"idle", "joining", "joined", "failed"};
+  char a[80], b[80];
+  jsonEscape(join_req.ssid, a, sizeof a); jsonEscape(join_req.kept, b, sizeof b);
+  server.send(200, "application/json", String("{\"state\":\"") + names[join_req.state] + "\",\"ssid\":\"" + a + "\",\"ip\":\"" + WiFi.localIP().toString() +
+                                         "\",\"kept\":\"" + (join_req.state == join_req.FAILED ? b : "") + "\"}");
+}
+
 // ---- firmware update over Wi-Fi: POST the raw image, as the stock firmware's updater takes it ----
 static struct { bool active, dry, failed, begun, ok; esp_ota_handle_t h; size_t total; String msg; mbedtls_sha256_context sha; uint8_t digest[32]; } ota;
 
@@ -438,6 +598,7 @@ static void otaRaw(bool dry) {                      // dry comes from the route:
   if (r.status == RAW_START) {
     if (ota.begun) esp_ota_abort(ota.h);
     ota.active = true; ota.dry = dry; ota.failed = false; ota.begun = false; ota.ok = false; ota.total = 0; ota.msg = "";
+    if (viaSetupAp()) otaFail("updates are not accepted over the setup hotspot");   // it is open: anyone nearby could be on it
     mbedtls_sha256_init(&ota.sha); mbedtls_sha256_starts(&ota.sha, 0);
   } else if (r.status == RAW_WRITE) {
     if (ota.failed || !r.currentSize) return;
@@ -547,8 +708,9 @@ static void hPerf() {
 // return to the other firmware. The first few fields are what the settings page shows; the rest is for diagnosis.
 static void hStatus() {
   const esp_partition_t *b = esp_ota_get_boot_partition();
-  wifi_config_t wc = {};
-  bool wifi_saved = esp_wifi_get_config(WIFI_IF_STA, &wc) == ESP_OK && wc.sta.ssid[0] != 0;
+  char net[33] = "", net_esc[80];
+  bool wifi_saved = savedWifi(net);
+  jsonEscape(net, net_esc, sizeof net_esc);
   Lock lock;
   String j = "{\"device\":true,\"version\":\"" FW_VERSION "\"";
   j += ",\"confirmed\":" + String(confirmed() ? "true" : "false");
@@ -560,6 +722,7 @@ static void hStatus() {
   j += ",\"frame_ms\":" + String(frame_ms) + ",\"frames\":" + String(frames) + ",\"brightness\":" + String(brightness);
   j += ",\"feed_count\":" + String(feed_count) + ",\"feed_errors\":" + String(feed_errors) + ",\"lookups\":" + String(lookups);
   j += ",\"home_set\":" + String(cfg.home_set ? "true" : "false") + ",\"wifi_saved\":" + String(wifi_saved ? "true" : "false");
+  j += ",\"wifi\":\"" + String(WiFi.status() == WL_CONNECTED ? net_esc : "") + "\",\"portal\":" + String(portal ? "true" : "false") + ",\"ap\":\"" + String(ap_name) + "\"";
   j += ",\"map\":" + String(radar.map ? "true" : "false") + ",\"map_zoom\":" + String(map_front ? map_front->zoom : -1);
   j += ",\"map_tiles\":" + String(map_tiles_fetched) + ",\"map_tile_failures\":" + String(map_tiles_failed) + ",\"map_decode_failures\":" + String(map_decode_failed);
   j += ",\"panel_err\":" + String((int)panel_err) + ",\"cache\":" + String(radar.cache ? "true" : "false");
@@ -611,6 +774,11 @@ static void hPsramTest() {
   server.send(200, "application/json", String("{\"found\":true,\"alloc\":true,\"bytes\":") + String(bytes) + ",\"bad_words\":" + String(bad) +
                                          ",\"write_ms\":" + String(t1 - t0) + ",\"read_ms\":" + String(t2 - t1) + "}");
 }
+static void hKeep() {                                // "keep this firmware": the same as /stay, for the settings page
+  touch();
+  bool c = confirmSelf();
+  server.send(c ? 200 : 500, "application/json", c ? "{\"confirmed\":true}" : "{\"confirmed\":false}");
+}
 static void hStay() { touch(); bool c = confirmSelf(); server.send(c ? 200 : 500, "text/plain", c ? "confirmed: this image now survives resets" : "confirm failed"); }
 static void hStock() {
   touch();
@@ -641,25 +809,62 @@ void setup() {
 
   WiFi.mode(WIFI_STA);
   WiFi.setHostname("radarmash");
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  uint8_t mac[6] = {0};
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);                         // (WiFi.macAddress() reads zeros this early)
+  snprintf(ap_name, sizeof ap_name, "RadarMASH-%02X%02X", mac[4], mac[5]);
+  bool have_wifi = savedWifi(nullptr);
+  if (have_wifi) WiFi.begin();                                 // the network the device already knows
+#ifdef WIFI_SSID
+  else { WiFi.begin(WIFI_SSID, WIFI_PASS); have_wifi = true; }   // development build with details compiled in
+#endif
 
   panelInit();
   free_q = xQueueCreate(2, sizeof(uint8_t)); work_q = xQueueCreate(2, sizeof(StripJob));
   for (uint8_t i = 0; i < 2; i++) xQueueSend(free_q, &i, 0);
   xTaskCreatePinnedToCore(senderTask, "send", 4096, nullptr, 1, nullptr, 0);   // same priority as the feed task, so they share the core
-  snprintf(boot_note, sizeof boot_note, "joining Wi-Fi");
-  drawFrame(true);
+  snprintf(boot_note, sizeof boot_note, have_wifi ? "joining Wi-Fi" : "starting");
+  drawFrame(!live_mode);
   ledcAttach(PIN_BL, 20000, 10); setBacklight(brightness);   // the light is off until driven: nothing else turns it on after a cold start
 
   uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 45000) drawFrame(true);
-  if (WiFi.status() != WL_CONNECTED) {
-    snprintf(boot_note, sizeof boot_note, "Wi-Fi failed");
-    drawFrame(true); drawFrame(true); delay(3000);
-    ESP.restart();                                           // unconfirmed: back to the other slot. Confirmed: try again.
-  }
+  while (have_wifi && WiFi.status() != WL_CONNECTED && millis() - t0 < 25000) drawFrame(!live_mode);
   boot_note[0] = 0;
+  // No network: put up the setup hotspot rather than give up. An unconfirmed image still returns to the other firmware
+  // on any reset, or after 30 minutes if nobody uses the hotspot.
+  if (WiFi.status() != WL_CONNECTED) {
+#ifdef WIFI_SSID
+    // Development build: the stored details did not work, so try the compiled-in ones (kept only if they do work).
+    memset(&join_req.wanted, 0, sizeof join_req.wanted);
+    strlcpy((char *)join_req.wanted.sta.ssid, WIFI_SSID, sizeof join_req.wanted.sta.ssid);
+    strlcpy((char *)join_req.wanted.sta.password, WIFI_PASS, sizeof join_req.wanted.sta.password);
+    strlcpy(join_req.ssid, WIFI_SSID, sizeof join_req.ssid);
+    join_req.had_old = false; join_req.started = millis(); join_req.state = join_req.JOINING;
+    tryWifi(join_req.wanted, false);
+    uint32_t t1 = millis();
+    snprintf(boot_note, sizeof boot_note, "joining Wi-Fi");
+    while (WiFi.status() != WL_CONNECTED && millis() - t1 < 20000) drawFrame(!live_mode);
+    boot_note[0] = 0;
+#endif
+    if (WiFi.status() != WL_CONNECTED) startPortal();
+  }
 
+  // Anything arriving over the open setup hotspot is sent to the Wi-Fi page; only that page's own calls get through.
+  server.addMiddleware([](WebServer &s, Middleware::Callback next) -> bool {
+    if (!viaSetupAp() || s.uri() == "/wifi" || s.uri().startsWith("/api/wifi")) return next();
+    s.sendHeader("Location", "http://192.168.4.1/wifi");
+    s.send(302, "text/plain", "");
+    return true;
+  });
+  server.onNotFound([]() {
+    if (viaSetupAp()) { server.sendHeader("Location", "http://192.168.4.1/wifi"); server.send(302, "text/plain", ""); }
+    else server.send(404, "text/plain", "not found");
+  });
+  server.on("/wifi", hWifiPage);
+  server.on("/api/wifi/scan", hWifiScan);
+  server.on("/api/wifi/status", hWifiStatus);
+  server.on("/api/wifi", HTTP_POST, hWifiJoin);
+  server.on("/api/wifi/portal", HTTP_POST, hWifiPortal);
+  server.on("/api/keep", HTTP_POST, hKeep);
   server.on("/", hUi);
   server.on("/api/status", hStatus);
   server.on("/status", hStatus);                       // older name, kept for scripts
@@ -707,6 +912,5 @@ void loop() {
     saveConfigIfDue();
   }
   if (!is_confirmed && now - last_activity_ms > 30UL * 60UL * 1000UL) ESP.restart();   // unconfirmed and left alone: go back
-  if (WiFi.status() == WL_CONNECTED) wifi_lost_ms = 0;
-  else { if (!wifi_lost_ms) wifi_lost_ms = now | 1; if (now - wifi_lost_ms > 10UL * 60UL * 1000UL) ESP.restart(); }
+  wifiTick(now);
 }

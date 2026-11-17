@@ -36,6 +36,13 @@ size_t configToJson(const Config &c, char *out, size_t out_size);
 // are clamped and nonsense is ignored. Returns false if the text is not a JSON object at all.
 bool configFromJson(const char *text, size_t len, Config &c);
 
+// A request to join a Wi-Fi network: {"ssid":"...","pass":"..."}. The name must be 1-32 characters; the password empty
+// (an open network) or 8-63 characters, which is what WPA allows. Returns false, leaving the outputs empty, otherwise.
+bool parseWifiRequest(const char *text, size_t len, char ssid[33], char pass[65]);
+
+// Text made safe to put inside a JSON string (network names can contain anything).
+size_t jsonEscape(const char *in, char *out, size_t out_size);
+
 constexpr size_t CONFIG_JSON_MAX = 1500;   // a buffer this big always fits configToJson
 
 }  // namespace rm
