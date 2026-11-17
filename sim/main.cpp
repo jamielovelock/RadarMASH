@@ -83,6 +83,7 @@ static void applyConfig() {
   live.feed_url = cfg.feed_url; live.refresh_s = cfg.refresh_s; live.include_ground = cfg.include_ground;
   live.enabled = cfg.wantsLive();
   tiles.url_template = cfg.map_url;
+  tiles.verify_certs = live.verify_certs = cfg.verify_certs;
   if (was_live != live.enabled || moved) { radar.count = 0; radar.selected = -1; live.last_count = -1; live.last_ok = 0; }   // a different sky
 }
 

@@ -12,6 +12,7 @@ struct SimTiles : rm::TileSource {
   std::string url_template;     // e.g. https://tile.openstreetmap.org/{z}/{x}/{y}.png
   std::string user_agent;       // tile servers want to know which program is asking
   int fetched = 0, failed = 0;  // since start, for the status line
+  bool verify_certs = true;     // off: pass -k to curl
 
   const uint16_t *tile(int zoom, int x, int y) override;
 

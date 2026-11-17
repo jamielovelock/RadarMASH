@@ -18,14 +18,14 @@ static void replaceAll(std::string &s, const std::string &from, const std::strin
   for (size_t p = s.find(from); p != std::string::npos; p = s.find(from, p + to.size())) s.replace(p, from.size(), to);
 }
 
-bool httpGet(const std::string &url, const std::string &ua, std::string &body) {
+bool httpGet(const std::string &url, const std::string &ua, std::string &body, bool verify) {
   body.clear();
   if (url.compare(0, 8, "https://") != 0 && url.compare(0, 7, "http://") != 0) return false;
   char tmp[] = "/tmp/radarmash-XXXXXX";
   int fd = mkstemp(tmp);
   if (fd < 0) return false;
   close(fd);
-  const char *argv[] = {"curl", "-sSL", "--compressed", "--max-time", "12", "-A", ua.c_str(), "-o", tmp, "--", url.c_str(), nullptr};
+  const char *argv[] = {"curl", verify ? "-sSL" : "-sSLk", "--compressed", "--max-time", "12", "-A", ua.c_str(), "-o", tmp, "--", url.c_str(), nullptr};
   pid_t pid;
   bool ok = posix_spawnp(&pid, "curl", nullptr, nullptr, (char *const *)argv, environ) == 0;
   if (ok) {
@@ -65,9 +65,10 @@ void Live::run() {
 
 void Live::poll() {
   std::string url, ua, url_before;
-  double lat, lon; bool ground; int limit;
+  double lat, lon; bool ground, verify; int limit;
   {
     std::lock_guard<std::mutex> lock(*mu_);
+    verify = verify_certs;
     url = url_before = feed_url; ua = user_agent; lat = radar_->home_lat; lon = radar_->home_lon; ground = include_ground;
     limit = radar_->set.max_aircraft < 1 ? 1 : radar_->set.max_aircraft > MAX_AIRCRAFT ? MAX_AIRCRAFT : radar_->set.max_aircraft;
     char num[32];
@@ -76,7 +77,7 @@ void Live::poll() {
     replaceAll(url, "{nm}", std::to_string(feedRadiusNm(radar_->range_km)));
   }
   std::string body;
-  bool got = httpGet(url, ua, body);
+  bool got = httpGet(url, ua, body, verify);
   std::vector<Aircraft> fresh(MAX_AIRCRAFT);
   int n = got ? parseAircraft(body.data(), body.size(), lat, lon, ground, fresh.data(), limit) : -1;
 
@@ -107,10 +108,11 @@ void Live::poll() {
 void Live::lookupSome() {
   std::vector<std::string> todo;
   std::string tmpl, ua;
+  bool verify;
   long now = (long)time(nullptr);
   {
     std::lock_guard<std::mutex> lock(*mu_);
-    tmpl = route_url; ua = user_agent;
+    tmpl = route_url; ua = user_agent; verify = verify_certs;
     for (int i = 0; i < radar_->count && todo.size() < 3; i++) {
       const char *cs = radar_->ac[i].callsign;
       float x, y;
@@ -123,7 +125,7 @@ void Live::lookupSome() {
   for (const std::string &cs : todo) {
     std::string url = tmpl, body;
     replaceAll(url, "{callsign}", cs);
-    httpGet(url, ua, body);
+    httpGet(url, ua, body, verify);
     RouteInfo info;
     RouteResult res = parseRoute(body.data(), body.size(), info);
     std::lock_guard<std::mutex> lock(*mu_);

@@ -34,9 +34,9 @@ std::string SimTiles::cacheDir() const {
 }
 
 // Run curl directly (no shell), so nothing in the URL can be read as a command.
-static bool download(const std::string &url, const std::string &ua, const std::string &dest) {
+static bool download(const std::string &url, const std::string &ua, const std::string &dest, bool verify) {
   std::string tmp = dest + ".part";
-  const char *argv[] = {"curl", "-fsSL", "--max-time", "15", "-A", ua.c_str(), "-o", tmp.c_str(), "--", url.c_str(), nullptr};
+  const char *argv[] = {"curl", verify ? "-fsSL" : "-fsSLk", "--max-time", "15", "-A", ua.c_str(), "-o", tmp.c_str(), "--", url.c_str(), nullptr};
   pid_t pid;
   if (posix_spawnp(&pid, "curl", nullptr, nullptr, (char *const *)argv, environ) != 0) return false;
   int status = 0;
@@ -67,7 +67,7 @@ const uint16_t *SimTiles::tile(int zoom, int x, int y) {
     replaceAll(url, "{z}", std::to_string(zoom)); replaceAll(url, "{x}", std::to_string(x)); replaceAll(url, "{y}", std::to_string(y));
     replaceAll(url, "{s}", "a");
     makeDirs(folder);
-    if (download(url, user_agent, path)) { fetched++; have = true; }
+    if (download(url, user_agent, path, verify_certs)) { fetched++; have = true; }
     else { failed++; if (!have) { failed_at_[key] = now; return nullptr; } }    // an old copy is better than nothing
   }
 

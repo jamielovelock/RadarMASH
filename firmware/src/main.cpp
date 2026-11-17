@@ -255,13 +255,19 @@ static RouteEntry *findRoute(const char *cs) {
   return nullptr;
 }
 
+// Secure connections are checked against the built-in list of certificate authorities (the same list browsers trust),
+// so a feed or map server is who it says it is. Plain http:// addresses, for a server on the home network, are allowed.
+static bool verify_certs = true;
+static WiFiClient plain_client;
+static void secure(WiFiClientSecure &c) { if (verify_certs) c.useBuiltinCACertBundle(); else c.setInsecure(); }
+
 static bool httpsGet(const String &url, String &body) {
   WiFiClientSecure client;
-  client.setInsecure();                             // development build: certificates are not checked yet
+  secure(client);
   HTTPClient http;
   http.setUserAgent(USER_AGENT);
   http.setConnectTimeout(8000); http.setTimeout(8000);
-  if (!http.begin(client, url)) return false;
+  if (!(url.startsWith("https://") ? http.begin(client, url) : http.begin(plain_client, url))) return false;
   int code = http.GET();
   bool ok = code == 200 || code == 404;             // 404 is the route service's "unknown callsign"
   if (ok) body = http.getString();
@@ -354,11 +360,11 @@ static int pngLine(PNGDRAW *d) {
 
 static bool fetchBytes(const String &url, uint8_t *&data, int &len) {
   WiFiClientSecure client;
-  client.setInsecure();                             // development build: certificates are not checked yet
+  secure(client);
   HTTPClient http;
   http.setUserAgent(USER_AGENT);
   http.setConnectTimeout(8000); http.setTimeout(8000);
-  if (!http.begin(client, url)) return false;
+  if (!(url.startsWith("https://") ? http.begin(client, url) : http.begin(plain_client, url))) return false;
   bool ok = false;
   if (http.GET() == 200) {
     len = http.getSize();
@@ -506,7 +512,10 @@ static void wifiTick(uint32_t now) {
   if (up) {
     if (!wifi_ok_since) wifi_ok_since = now | 1;
     wifi_lost_since = 0;
-    if (!mdns_up) mdns_up = MDNS.begin("radarmash");                      // reachable as radarmash.local
+    if (!mdns_up) {
+      mdns_up = MDNS.begin("radarmash");                                   // reachable as radarmash.local
+      configTime(0, 0, "pool.ntp.org", "time.cloudflare.com");             // certificates have dates, so the clock must be right
+    }
   } else {
     if (!wifi_lost_since) wifi_lost_since = now | 1;
     wifi_ok_since = 0;
@@ -669,7 +678,7 @@ static void applyConfig() {                         // caller holds the lock (or
   radar.set = cfg.set;
   radar.home_lat = cfg.home_lat; radar.home_lon = cfg.home_lon;
   radar.range_km = cfg.range_km;
-  refresh_s = cfg.refresh_s; include_ground = cfg.include_ground;
+  refresh_s = cfg.refresh_s; include_ground = cfg.include_ground; verify_certs = cfg.verify_certs;
   feed_url = cfg.feed_url;                          // (also undoes any automatic swap to the other feed)
   map_url = cfg.map_url;
   snprintf(map_credit, sizeof map_credit, "%s", cfg.map_credit);
@@ -733,6 +742,7 @@ static void hStatus() {
   j += ",\"wifi\":\"" + String(WiFi.status() == WL_CONNECTED ? net_esc : "") + "\",\"portal\":" + String(portal ? "true" : "false") + ",\"ap\":\"" + String(ap_name) + "\"";
   j += ",\"map\":" + String(radar.map ? "true" : "false") + ",\"map_zoom\":" + String(map_front ? map_front->zoom : -1);
   j += ",\"map_tiles\":" + String(map_tiles_fetched) + ",\"map_tile_failures\":" + String(map_tiles_failed) + ",\"map_decode_failures\":" + String(map_decode_failed);
+  j += ",\"time_set\":" + String(time(nullptr) > 1700000000 ? "true" : "false") + ",\"verify_certs\":" + String(verify_certs ? "true" : "false");
   j += ",\"panel_err\":" + String((int)panel_err) + ",\"cache\":" + String(radar.cache ? "true" : "false");
   j += ",\"psram\":" + String(psramOk() ? "true" : "false") + ",\"psram_free\":" + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   j += ",\"reset_reason\":" + String((int)esp_reset_reason()) + ",\"uptime_ms\":" + String(millis());
@@ -786,6 +796,26 @@ static void hKeep() {                                // "keep this firmware": th
   touch();
   bool c = confirmSelf();
   server.send(c ? 200 : 500, "application/json", c ? "{\"confirmed\":true}" : "{\"confirmed\":false}");
+}
+// Self-test of certificate checking: connect to servers that deliberately present bad certificates (badssl.com exists
+// for this) and to one good one. With checking on, only the good one should connect.
+static void hTlsTest() {
+  touch();
+  static const char *const sites[] = {"https://expired.badssl.com/", "https://self-signed.badssl.com/", "https://wrong.host.badssl.com/",
+                                      "https://untrusted-root.badssl.com/", "https://tile.openstreetmap.org/0/0/0.png"};
+  String j = String("{\"checking\":") + (verify_certs ? "true" : "false") + ",\"time_set\":" + (time(nullptr) > 1700000000 ? "true" : "false") + ",\"connected\":{";
+  for (size_t i = 0; i < sizeof sites / sizeof sites[0]; i++) {
+    WiFiClientSecure client;
+    secure(client);
+    HTTPClient http;
+    http.setUserAgent(USER_AGENT);
+    http.setConnectTimeout(8000); http.setTimeout(8000);
+    int code = http.begin(client, sites[i]) ? http.GET() : -100;
+    http.end();
+    esp_task_wdt_reset();                             // several slow connections in one call from the main loop
+    j += String(i ? "," : "") + "\"" + String(sites[i] + 8) + "\":" + (code > 0 ? "true" : "false");
+  }
+  server.send(200, "application/json", j + "}}");
 }
 static void hStay() { touch(); bool c = confirmSelf(); server.send(c ? 200 : 500, "text/plain", c ? "confirmed: this image now survives resets" : "confirm failed"); }
 static void hStock() {
@@ -885,6 +915,7 @@ void setup() {
   server.on("/reboot", hReboot);
   server.on("/perf", hPerf);
   server.on("/psramtest", hPsramTest);
+  server.on("/tlstest", hTlsTest);
   server.on("/stay", hStay);
   server.on("/stock", hStock);
   server.on("/ota", HTTP_POST, hOtaDone, hOtaRaw);

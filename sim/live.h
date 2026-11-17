@@ -16,6 +16,7 @@ struct Live {
   int refresh_s = 5;
   bool include_ground = false;
   bool routes = true;
+  bool verify_certs = true;     // off: pass -k to curl
   bool enabled = false;         // poll only while this is set (live mode)
 
   // status, for the page
@@ -40,4 +41,4 @@ private:
 };
 
 // Fetch a URL with curl (no shell). Returns false if curl failed; `body` holds the reply either way.
-bool httpGet(const std::string &url, const std::string &user_agent, std::string &body);
+bool httpGet(const std::string &url, const std::string &user_agent, std::string &body, bool verify_certs = true);

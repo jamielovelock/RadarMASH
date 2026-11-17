@@ -102,6 +102,17 @@ TEST(config_sweep_speed_and_map_detail) {
   CHECK(c.set.sweep_seconds == 2 && c.set.map_detail == 1);     // clamped to what the radar can do
 }
 
+TEST(config_certificate_checking_is_on_unless_turned_off) {
+  Config c;
+  CHECK(c.verify_certs);
+  CHECK(dump(c).find("\"verify_certs\":true") != std::string::npos);
+  CHECK(load(c, "{\"verify_certs\":\"no\"}") && c.verify_certs);     // only a real false turns it off
+  CHECK(load(c, "{\"verify_certs\":false}") && !c.verify_certs);
+  Config d;
+  std::string text = dump(c);
+  CHECK(configFromJson(text.data(), text.size(), d) && !d.verify_certs);
+}
+
 TEST(config_font_is_stored_by_name) {
   Config c;
   CHECK(dump(c).find("\"font\":\"classic\"") != std::string::npos);

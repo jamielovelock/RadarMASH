@@ -24,6 +24,7 @@ struct Config {
   char map_url[128];
   char map_credit[28];
   uint8_t brightness = 100;           // backlight, percent
+  bool verify_certs = true;           // check the security certificates of https sources (turn off only for your own server)
 
   Config();
   bool wantsLive() const { return live && home_set; }
@@ -43,6 +44,6 @@ bool parseWifiRequest(const char *text, size_t len, char ssid[33], char pass[65]
 // Text made safe to put inside a JSON string (network names can contain anything).
 size_t jsonEscape(const char *in, char *out, size_t out_size);
 
-constexpr size_t CONFIG_JSON_MAX = 1540;   // a buffer this big always fits configToJson
+constexpr size_t CONFIG_JSON_MAX = 1580;   // a buffer this big always fits configToJson
 
 }  // namespace rm
