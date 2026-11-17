@@ -1,125 +1,222 @@
-# RadarMASH
+<h1 align="center">RadarMASH</h1>
 
-Open firmware for the GeekMagic Radar 360 (model `radar21en`): a 2.1" round, 360x360 desk display that shows the aircraft
-around you. Named in honour of Radar O'Reilly, who always heard the choppers first.
+<p align="center">
+  <b>Open firmware for the GeekMagic Radar 360.</b><br>
+  A real radar sweep, the aircraft over your house, and where they are going.
+</p>
 
-**Status: first release, v0.1.0.** It runs as the everyday firmware on the author's radar: sweep, map, live aircraft with
-checked routes, saved settings, a settings page, Wi-Fi setup, and a way back to the original firmware. It is still young.
-Read the firmware section below before flashing anything: the case is sealed and Wi-Fi is the only way in.
+<p align="center">
+  <a href="https://github.com/jamielovelock/RadarMASH/actions/workflows/ci.yml"><img src="https://github.com/jamielovelock/RadarMASH/actions/workflows/ci.yml/badge.svg" alt="Build status"></a>
+  <a href="https://github.com/jamielovelock/RadarMASH/releases/latest"><img src="https://img.shields.io/badge/download-latest%20firmware-2ea44f" alt="Download the latest firmware"></a>
+  <img src="https://img.shields.io/badge/licence-GPL--3.0--or--later-blue" alt="Licence: GPL-3.0-or-later">
+</p>
 
-## Layout
+<p align="center">
+  <img src="docs/img/sweep.gif" width="388" alt="The radar screen: a green sweep turning over a dark map, with aircraft, trails and a tag box showing a flight's route">
+</p>
 
-| Folder | What it is |
-|---|---|
-| `core/` | Portable C++ drawing code and the radar screen. No hardware dependencies. |
-| `sim/` | Desktop simulator: runs `core/` on your computer and shows the screen in a web browser, with demo or live aircraft. |
-| `tests/` | Unit tests for `core/`. |
-| `firmware/` | Device firmware (PlatformIO, Arduino for ESP32-S3). |
-| `web/` | The settings page, served by both the simulator and the device. |
-| `tools/` | Build helpers. |
+<p align="center"><sub>Straight from the simulator, which draws exactly what the device draws. Demo traffic; map © OpenStreetMap contributors.</sub></p>
 
-The firmware builds the same `core/` code as the simulator, so what you see in one is what the other draws.
+The Radar 360 is a 2.1-inch round desk display that shows aircraft near you. RadarMASH replaces its firmware with one
+you can read, change and trust: it tells you which flight is overhead, who operates it and where it is really going, over
+a map of your own area, on a sweep that behaves like the real thing.
 
-## Running the simulator
+Named for Radar O'Reilly, who always heard the choppers first.
 
-You need a C++17 compiler and `make` (macOS or Linux), plus `curl` if you want the map.
+<p align="center">
+  <a href="https://github.com/jamielovelock/RadarMASH/releases/latest/download/radarmash-radar21en.bin"><b>⬇ Download the latest firmware</b></a>
+  &nbsp;·&nbsp; <a href="#install">How to install</a>
+  &nbsp;·&nbsp; <a href="#try-it-without-a-radar">Try it without a radar</a>
+</p>
+
+---
+
+## What it looks like
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/img/radar-map.png" width="330" alt="Radar over a dark map with one flight highlighted"><br><sub>A highlighted flight, with its route</sub></td>
+    <td align="center"><img src="docs/img/radar-sky.png" width="260" alt="Radar showing several aircraft with trails"><br><sub>Trails follow each aircraft's real path</sub></td>
+    <td align="center"><img src="docs/img/radar-green.png" width="260" alt="Radar with a green-tinted map"><br><sub>Green map style</sub></td>
+  </tr>
+</table>
+
+## What it does
+
+**A proper radar scope**
+- A rotating sweep with a fading trail, at a speed you choose.
+- Aircraft flash bright as the sweep passes and fade until it comes round again, like a real display.
+- Range rings, and five ranges from 10 to 160 km on the button.
+- Around 30 to 40 frames a second on the device.
+
+**The aircraft, properly identified**
+- Live positions from free community feeds, gliding smoothly between updates.
+- Different shapes for light aircraft, single-aisle and twin-aisle airliners, helicopters and military aircraft.
+- A tag box that steps through the aircraft in view: callsign, route, type, level and speed, your choice of which.
+- Airline name, origin and destination, **checked for sense**. Route databases are often wrong, because flight numbers
+  get reused. RadarMASH tests each route against where the aircraft is, which way it is heading and whether it is
+  climbing or descending, asks a second source when the first does not fit, and shows nothing sooner than something wrong.
+- Trails that follow the path actually flown, turns included.
+- Labels that move out of each other's way when the sky gets busy.
+- Airline logos beside the flight, if you point it at a collection (none are bundled: see [Logos](#logos)).
+
+**A map of where you are**
+- An underlay from standard web map tiles. OpenStreetMap works out of the box with no account or key.
+- Dark and green styles made on the device from an ordinary light map, plus brightness and a sharper-detail option.
+- Use any tile provider you like by pasting in its address.
+
+**Yours to set up**
+- One settings page for everything, served by the radar itself. Nothing to install, no app, no account.
+- A draggable map to put the radar exactly where it lives.
+- Five fonts, from chunky pixels to the typeface Airbus designed for cockpits.
+- Every feature has its own switch.
+- Settings are stored on the radar and survive restarts and power cuts.
+
+**Careful with your device**
+- Starts **on trial**: until you choose to keep it, any restart or power cycle returns to the firmware you came from.
+- The original firmware stays on the device, one tap away.
+- Wi-Fi setup through the radar's own hotspot, and a wrong password can never replace details that work.
+- Checks the security certificates of the servers it talks to.
+- Your position and Wi-Fi details stay on the radar. There is no cloud and no telemetry.
+
+## The settings page
+
+<table>
+  <tr>
+    <td align="center" valign="top"><img src="docs/img/settings.png" width="430" alt="The settings page: screen options, feature switches, a map for setting the radar's position, data source and map settings"></td>
+    <td align="center" valign="top"><img src="docs/img/wifi-setup.png" width="330" alt="The Wi-Fi setup page: nearby networks, network name and password"><br><sub>Wi-Fi setup, reached through the radar's own hotspot</sub></td>
+  </tr>
+</table>
+
+### Fonts
+
+<p align="center"><img src="docs/img/fonts.png" alt="The same tag box in five fonts: Classic pixel, B612 Mono, JetBrains Mono, Roboto Condensed and VT323"></p>
+<p align="center"><sub>Classic pixel · B612 Mono · JetBrains Mono · Roboto Condensed · VT323</sub></p>
+
+## Install
+
+> **Read this first.** The Radar 360's case is sealed and it has no USB data connection, so Wi-Fi is the only way to
+> load firmware. RadarMASH is built around never leaving you stuck, but you are replacing the firmware on your own
+> device at your own risk. It has been proven on one unit so far: model `radar21en`, coming from original firmware 0.4.41.
+
+1. **Download** [`radarmash-radar21en.bin`](https://github.com/jamielovelock/RadarMASH/releases/latest/download/radarmash-radar21en.bin)
+   from the [latest release](https://github.com/jamielovelock/RadarMASH/releases/latest). Use only this app image:
+   never a bootloader, partition table or "factory" image.
+2. **Upload it** on the original firmware's update page. If the radar has just started, wait a minute first; it
+   refuses uploads until it has settled. From a terminal:
+
+       curl -H 'Content-Type: application/octet-stream' --data-binary @radarmash-radar21en.bin http://YOUR-RADAR/api/ota
+
+3. **Join its hotspot.** The screen shows a network called `RadarMASH-xxxx`. Join it from a phone, pick your Wi-Fi and
+   enter the password. (If the page does not appear by itself, open `http://192.168.4.1`.)
+4. **Open the settings page** at the address the setup page gives you, or `http://radarmash.local`, and drag the map to
+   where you are. Aircraft appear within a few seconds.
+5. **Live with it for a while.** It is still on trial: pull the plug and you are back on the original firmware.
+   When you are happy, press **Keep this firmware** on the settings page.
+
+**Going back.** Before you keep it, restart or power-cycle the radar. After you keep it, the original firmware is still
+in the device's other slot: open `http://YOUR-RADAR/stock`, then restart.
+
+**Updating RadarMASH later.** The settings page has an upload button. Be aware of what it does: the RadarMASH you are
+running becomes the fallback, replacing the original firmware in the other slot, and the new version starts on trial.
+
+### How it stays recoverable
+
+- It never makes itself permanent. Until you confirm it, the device's own bootloader returns to the previous firmware
+  on any reset.
+- Left untouched for 30 minutes while on trial, it goes back by itself. Holding the button for 8 seconds does the same.
+- Its updater writes only the other slot, and refuses images that are the wrong kind, too big or damaged.
+- If it cannot join Wi-Fi it puts up the setup hotspot and keeps retrying the network it knows. Over that open hotspot
+  only the Wi-Fi page can be reached, never the settings or the updater.
+
+## Try it without a radar
+
+The simulator runs the same drawing code on your computer and shows the round screen in a browser, with the same
+settings page underneath. You need a C++17 compiler, `make` and `curl` (macOS or Linux).
 
     make -C sim run
 
-Then open http://localhost:8360: the round screen, with the settings page underneath. It is the same page the device
-serves, so anything set up here works the same there. The simulator keeps its settings in
-`~/.config/radarmash/simulator.json`.
+Then open http://localhost:8360. It starts with made-up demo traffic. For real aircraft, set your position on the
+settings page, or start it with:
 
-To save one frame instead: `sim/radarmash-sim --shot frame.bmp --t 9000 --select 0`
+    make -C sim run ARGS="--live --home LAT,LON"
 
-## Live aircraft
+To save a single frame: `sim/radarmash-sim --shot frame.bmp --t 9000 --select 0 --map`
 
-    make run ARGS="--live --home LAT,LON"
+## Where the data comes from
 
-shows real aircraft around that position instead of the demo traffic. Your position is only ever given on the command
-line; it is not stored in the project.
+RadarMASH leans on free services run by enthusiasts. Please be gentle with them: the defaults are.
 
-- **Positions** come from [adsb.fi](https://adsb.fi) or [adsb.lol](https://adsb.lol), two free community services that
-  serve the same "readsb" format. If one stops answering, the simulator switches to the other. The refresh rate is
-  settable; please keep it gentle (the default is every 5 seconds, the minimum 2).
-- **Airline names and routes** come from [adsbdb](https://www.adsbdb.com), looked up a few callsigns at a time and
-  remembered. These services hold what a flight number usually flies, and flight numbers get reused, so some answers
-  are wrong for the aircraft overhead. Each route is therefore checked against where the aircraft is, which way it is
-  heading and whether it is climbing or descending. If it does not fit, or there is none, [hexdb](https://hexdb.io) is
-  asked and held to the same test. A route that fails is not shown: no route is better than a wrong one.
-- Between updates each aircraft is carried on along its track, so it glides rather than jumps.
-- At most 10 aircraft are shown by default, the nearest first; the limit is settable.
+| What | From | Notes |
+|---|---|---|
+| Aircraft positions | [adsb.fi](https://adsb.fi), [adsb.lol](https://adsb.lol) | Refreshed every 5 seconds by default. If one stops answering, the other is used. |
+| Airline and route | [adsbdb](https://www.adsbdb.com), then [hexdb](https://hexdb.io) | Looked up once per flight and checked against the aircraft. |
+| Map | [OpenStreetMap](https://www.openstreetmap.org/copyright) by default | Its [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) applies. Map data © OpenStreetMap contributors, shown on screen. |
 
-## Map underlay
+### Logos
 
-The radar can draw over a map built from standard 256-pixel web map tiles. The source is a URL pattern such as
-`https://tile.openstreetmap.org/{z}/{x}/{y}.png`, so any provider that serves tiles this way can be used; the simulator page
-has a box for the pattern, the credit line the provider asks for, a style (as is, dark, green) and brightness. Light maps
-are turned dark in software. The zoom follows the radar range.
+RadarMASH contains no airline logos: they are the airlines' trademarks, and not ours to give away. If you have a
+collection you are entitled to use, put its address in **Airline logos** on the settings page, with `{icao}` where the
+airline's three-letter code goes, for example `https://example.org/logos/{icao}.png`. The radar fetches each logo the
+first time it is needed. Clear the box to turn them off.
 
-The default is OpenStreetMap's own tile server, which needs no key. Its
-[usage policy](https://operations.osmfoundation.org/policies/tiles/) applies: tiles are cached (the simulator keeps them
-in `~/.cache/radarmash` for 30 days), only what is on screen is fetched, and the credit stays visible. Map data is
-(c) OpenStreetMap contributors.
+## For developers
 
-## Firmware (development build)
+| Folder | What it is |
+|---|---|
+| `core/` | Portable C++: drawing, the radar screen, map, feeds, settings. No hardware dependencies. |
+| `sim/` | Desktop simulator. Builds `core/` and serves the screen and settings page to a browser. |
+| `firmware/` | Device firmware (PlatformIO, Arduino for ESP32-S3). Builds the same `core/`. |
+| `web/` | The settings and Wi-Fi pages, embedded into both the simulator and the firmware. |
+| `tests/` | Unit tests for `core/`. |
+| `tools/` | Build helpers: image check, page embedding, font conversion. |
 
-**Read this before flashing anything.** The Radar 360's case is sealed and it has no USB data connection, so Wi-Fi is
-the only way to load firmware. A build that cannot join Wi-Fi and accept an update, once made permanent, cannot be
-replaced. The firmware is written around that:
+Because the simulator and the firmware share one drawing core, a change shows up on your desk in seconds and behaves
+the same on the device.
 
-- It never makes itself permanent at start-up. Until it is confirmed, any reset or power cycle returns to the firmware
-  in the other slot (the stock firmware, if that is what you came from).
-- Left alone for 30 minutes while unconfirmed, it goes back by itself. Holding the button for 8 seconds does the same.
-- Its own updater writes only the other slot, and confirms itself first so a failed upload never leaves nothing bootable.
-- Only ever upload the app image. Never write a bootloader, partition table or "factory" image.
+**Build the firmware** with `firmware/build.sh` (needs [PlatformIO](https://platformio.org)). It produces
+`radarmash-radar21en.bin` and checks it. No Wi-Fi details are compiled in.
 
-To build, run `firmware/build.sh` (needs PlatformIO). No Wi-Fi details are compiled in: the firmware joins the network
-the device already knows, and otherwise puts up a hotspot called `RadarMASH-xxxx`; join it and the setup page appears
-(or open http://192.168.4.1). New details are only stored once they have worked. Over that hotspot only the setup page
-can be reached, never the settings or the updater. That produces `radarmash-radar21en.bin`, which the stock firmware's updater
-accepts: `curl -H 'Content-Type: application/octet-stream' --data-binary @radarmash-radar21en.bin http://DEVICE/api/ota`.
-Stock refuses uploads for about a minute after it boots. The device then serves the settings page at its address.
-Settings, including where the radar is, are stored on the device only.
+**Tests**
 
-## Settings
+    make test      # unit tests for the drawing code and radar behaviour
+    make check     # what CI runs: the tests, then a simulator smoke test
 
-One page (`web/admin.html`) sets everything: which features are shown, the font, brightness, range, live or demo aircraft, where
-the radar is, the data source and refresh rate, and the map source, style and brightness. It talks JSON:
+The tests need only a C++ compiler. On every push the pipeline runs them with GCC and Clang under memory and
+undefined-behaviour checking, builds the firmware, and checks the image. Pushing a version tag builds the image again and
+attaches it to the release, so released images always come from the pipeline, never from someone's laptop.
+
+One test matters more than the rest: the device has no room for a whole frame and draws the screen in narrow strips,
+and that must give exactly the same picture as drawing it whole.
+
+**The settings API** is plain JSON, the same on the simulator and the device:
 
     GET  /api/settings            everything, as one object
     POST /api/settings            any subset, e.g. {"trails": false, "range_km": 80}
     GET  /api/status              what the radar is doing
     POST /api/press, /api/hold    the button
 
-Values out of range are clamped and anything unrecognised is ignored, so an old page and new firmware (or the reverse)
-get along.
+Values out of range are clamped and anything unrecognised is ignored, so an old page and new firmware get along.
 
-## Fonts
+**Fonts** are bitmaps generated by `tools/make_fonts.py` (needs Pillow) into `core/fonts_data.cpp`, which is checked in.
+Only fonts that may be redistributed in converted form under their own name are suitable.
 
-The settings page offers the original pixel font and four typefaces, each in three sizes with soft edges. To add or
-change one, edit the list in `tools/make_fonts.py` and run it (it needs Pillow, and downloads the font files into
-`build/`); it rewrites `core/fonts_data.cpp`, which is checked in so ordinary builds need neither. Only fonts that may
-be redistributed in a converted form under their own name are suitable.
+## Known limits
 
-## Tests
+- Proven on one radar. A second owner's experience would be valuable.
+- Map tiles and logos are kept in memory, so they are fetched again after a restart.
+- Logos appear in the tag box, not on the large detail card.
+- Route checking catches routes that do not fit the aircraft; a wrong route that happens to look plausible still gets through.
 
-    make test      # unit tests for the drawing code and radar behaviour
-    make check     # what CI runs: the tests, then a simulator smoke test
+## Licence and credits
 
-The tests need only a C++ compiler. CI runs them on every push with both GCC and Clang, with memory and
-undefined-behaviour checking switched on, and also builds the firmware and checks the image (`tools/check_image.py`:
-right kind, right name, fits the slot, checksums intact). Pushing a version tag builds the image again and attaches it to
-the release, so released images always come from the pipeline. Run one group with `build/tests <part of a test name>`.
+GPL-3.0-or-later; see `LICENSE`. If you ship a modified RadarMASH, share your changes.
 
-One test matters more than the rest: drawing the screen in narrow strips, as the device does, must give exactly the same
-picture as drawing it whole.
+- The firmware links [PNGdec](https://github.com/bitbank2/PNGdec) (Apache-2.0), fetched at build time.
+- The fonts in `core/fonts_data.cpp` are bitmaps of B612 Mono, JetBrains Mono, Roboto Condensed and VT323, each under
+  the SIL Open Font License 1.1 (see `licenses/`).
+- Two bundled files keep their own licences, reproduced inside them: `core/font5x7.h` (Adafruit GFX Library, BSD) and
+  `sim/third_party/stb_image.h` (stb, public domain / MIT; simulator only).
 
-## Licence
-
-GPL-3.0-or-later; see `LICENSE`. The firmware links the PNGdec library (Apache-2.0), fetched at build time. The fonts in
-`core/fonts_data.cpp` are bitmaps of B612 Mono, JetBrains Mono, Roboto Condensed and VT323, each under the SIL Open Font
-License 1.1 (see `licenses/`). Two bundled files keep their own licences, reproduced inside them: `core/font5x7.h`
-(Adafruit GFX Library, BSD) and `sim/third_party/stb_image.h` (stb, public domain / MIT; simulator only).
-
-RadarMASH is an independent hobby project. It is not affiliated with GeekMagic, and contains none of their code.
+RadarMASH is an independent hobby project. It is not affiliated with GeekMagic and contains none of their code, and it
+has no connection with the makers of M\*A\*S\*H beyond affection.

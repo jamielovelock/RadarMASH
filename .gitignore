@@ -3,6 +3,7 @@ sim/radarmash-sim
 *.o
 *.bmp
 *.png
+!docs/img/*.png
 .pio/
 *.bin
 # never commit credentials

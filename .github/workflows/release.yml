@@ -32,5 +32,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "RadarMASH ${GITHUB_REF_NAME#v}" --generate-notes
-          sha256sum radarmash-*-radar21en.bin
-          gh release upload "$GITHUB_REF_NAME" radarmash-*-radar21en.bin --clobber
+          # A second copy under a name that does not change, so "latest release" has a link that always works:
+          #   https://github.com/OWNER/REPO/releases/latest/download/radarmash-radar21en.bin
+          cp radarmash-*-radar21en.bin radarmash-radar21en.bin
+          sha256sum radarmash-*.bin
+          gh release upload "$GITHUB_REF_NAME" radarmash-*.bin --clobber
