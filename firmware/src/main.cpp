@@ -42,7 +42,7 @@
 #include "secrets.h"                                 // optional: Wi-Fi details for a development build
 #endif
 
-#define FW_VERSION "0.1.0-dev"
+#define FW_VERSION "0.1.0"
 #define USER_AGENT "RadarMASH/" FW_VERSION
 
 extern "C" bool verifyRollbackLater() { return true; }   // stop the Arduino core confirming the image for us

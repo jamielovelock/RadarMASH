@@ -3,9 +3,9 @@
 Open firmware for the GeekMagic Radar 360 (model `radar21en`): a 2.1" round, 360x360 desk display that shows the aircraft
 around you. Named in honour of Radar O'Reilly, who always heard the choppers first.
 
-**Status: early development.** The simulator is the easy way to try it. The device firmware is a development build that
-boots, shows live aircraft over the map and remembers its settings. Its Wi-Fi setup hotspot is new and not yet proven
-end to end, so it is not ready for general use.
+**Status: first release, v0.1.0.** It runs as the everyday firmware on the author's radar: sweep, map, live aircraft with
+checked routes, saved settings, a settings page, Wi-Fi setup, and a way back to the original firmware. It is still young.
+Read the firmware section below before flashing anything: the case is sealed and Wi-Fi is the only way in.
 
 ## Layout
 

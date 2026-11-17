@@ -4,7 +4,7 @@
 #   PIO=/path/to/pio ./build.sh [version]
 set -e
 cd "$(dirname "$0")"
-VER=${1:-0.1.0-dev}
+VER=${1:-0.1.0}
 python3 ../tools/embed.py ../web/admin.html include/admin_html.h ADMIN_HTML
 python3 ../tools/embed.py ../web/wifi.html include/wifi_html.h WIFI_HTML
 ${PIO:-pio} run -e radar360
