@@ -108,7 +108,9 @@ be redistributed in a converted form under their own name are suitable.
     make check     # what CI runs: the tests, then a simulator smoke test
 
 The tests need only a C++ compiler. CI runs them on every push with both GCC and Clang, with memory and
-undefined-behaviour checking switched on. Run one group with `build/tests <part of a test name>`.
+undefined-behaviour checking switched on, and also builds the firmware and checks the image (`tools/check_image.py`:
+right kind, right name, fits the slot, checksums intact). Pushing a version tag builds the image again and attaches it to
+the release, so released images always come from the pipeline. Run one group with `build/tests <part of a test name>`.
 
 One test matters more than the rest: drawing the screen in narrow strips, as the device does, must give exactly the same
 picture as drawing it whole.

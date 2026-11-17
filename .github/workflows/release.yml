@@ -1,0 +1,36 @@
+# Pushing a tag like v0.2.0 builds the firmware and attaches the image to that release. The tag must match the version
+# compiled into the firmware, so a release can never carry an image that calls itself something else.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  firmware:
+    uses: ./.github/workflows/firmware.yml
+
+  publish:
+    name: Attach image to the release
+    needs: firmware
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Tag must match the firmware's version
+        run: test "${GITHUB_REF_NAME}" = "v${{ needs.firmware.outputs.version }}"
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware
+      - name: Create the release if needed, then attach the image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "RadarMASH ${GITHUB_REF_NAME#v}" --generate-notes
+          sha256sum radarmash-*-radar21en.bin
+          gh release upload "$GITHUB_REF_NAME" radarmash-*-radar21en.bin --clobber

@@ -28,3 +28,7 @@ jobs:
           name: smoke-frame
           path: build/smoke.bmp
           if-no-files-found: ignore
+
+  firmware:
+    name: Firmware image
+    uses: ./.github/workflows/firmware.yml

@@ -1,0 +1,49 @@
+# Builds the device firmware and checks the image. Used by CI on every push and by the release workflow on a tag, so
+# a released image is always one this pipeline built, from a clean checkout with no Wi-Fi details anywhere near it.
+name: Firmware
+
+on:
+  workflow_call:
+    outputs:
+      version:
+        description: The version compiled into the image
+        value: ${{ jobs.build.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and check
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            firmware/.pio/libdeps
+          key: platformio-${{ runner.os }}-${{ hashFiles('firmware/platformio.ini') }}
+      - name: Install PlatformIO
+        run: pip install --quiet platformio
+      - name: No Wi-Fi details in the tree
+        run: test ! -e firmware/include/secrets.h
+      - name: Build (also checks the image)
+        run: firmware/build.sh
+      - name: Read the version
+        id: version
+        run: echo "version=$(sed -n 's/^#define FW_VERSION "\(.*\)"$/\1/p' firmware/src/main.cpp)" >> "$GITHUB_OUTPUT"
+      - name: Name the image
+        run: cp firmware/radarmash-radar21en.bin "radarmash-${{ steps.version.outputs.version }}-radar21en.bin"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: radarmash-*-radar21en.bin
+          if-no-files-found: error
