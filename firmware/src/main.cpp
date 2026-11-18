@@ -46,7 +46,7 @@
 #include "secrets.h"                                 // optional: Wi-Fi details for a development build
 #endif
 
-#define FW_VERSION "0.2.0"
+#define FW_VERSION "0.3.0-dev"
 // Map and data servers ask programs to say who they are and where to find them.
 #define USER_AGENT "RadarMASH/" FW_VERSION " (+https://github.com/jamielovelock/RadarMASH)"
 
