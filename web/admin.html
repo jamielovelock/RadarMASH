@@ -30,6 +30,7 @@
   #pick .zoom button { width:30px; padding:2px 0; background:#fff; color:#111; border-color:#999; }
   #pick .credit { position:absolute; right:0; bottom:0; padding:1px 5px; font-size:11px; background:rgba(255,255,255,.75); color:#222; }
   #pick .credit a { color:inherit; }
+  [hidden] { display:none !important; } code { font-size:13px; word-break:break-all; }
   #saved { float:right; color:var(--accent); opacity:0; transition:opacity .3s; } #saved.on { opacity:1; }
 </style>
 <main>
@@ -44,7 +45,24 @@
       <option value="10">10 km</option><option value="20">20 km</option><option value="40">40 km</option><option value="80">80 km</option><option value="160">160 km</option></select>
       <button data-post="/api/press">Next aircraft</button><button data-post="/api/hold">Next range</button></div>
     <div class="row"><span>Sweep speed</span><input type="range" min="2" max="30" data-k="sweep_seconds"><small data-secs="sweep_seconds"></small></div>
+    <div class="row"><span>Clock time zone</span><select data-k="utc_auto" data-bool><option value="true">from your position</option><option value="false">set by hand</option></select>
+      <select data-k="utc_offset_min" data-num id="utcoff"></select></div>
+    <div class="row"><span>Dim at night</span><select data-k="night" data-num><option value="0">never</option><option value="1">from sunset to sunrise</option><option value="2">between set times</option></select>
+      <span id="nighttimes"><input type="time" data-time="night_start_min"> to <input type="time" data-time="night_end_min"></span></div>
+    <div class="row" id="nightrow"><span>Night brightness</span><input type="range" min="1" max="100" data-k="night_brightness"><small data-show="night_brightness"></small></div>
     <div class="checks" id="toggles"></div>
+  </section>
+
+  <section>
+    <h2>Pages</h2>
+    <div class="row"><span>Show now</span><button data-do="page=radar">Radar</button><button data-do="page=weather">Weather</button><button data-do="page=board">Airport board</button><button data-do="page=log">Overhead log</button><small id="pagenow"></small></div>
+    <p class="hint">On the radar itself: press the button twice quickly for the next page, once to come back to the scope. Hold it to change range.</p>
+    <div class="row"><span>Change page every</span><input type="number" min="0" max="3600" data-k="page_cycle_s"><small>seconds (0: only when asked)</small></div>
+    <div class="row"><span>Weather units</span><select data-k="units" data-num><option value="0">°C, km/h</option><option value="1">°C, mph</option><option value="2">°C, knots</option><option value="3">°F, mph</option></select></div>
+    <div class="row"><span>Board airport</span><input type="text" data-k="board_airport" maxlength="4" spellcheck="false" placeholder="busiest seen" style="flex:0 0 9em"><small>the code routes show, such as LHR</small></div>
+    <div class="row"><span>Overhead means</span><input type="number" min="0.5" max="50" step="0.5" data-k="overhead_km"><small>km or closer</small></div>
+    <div class="row"><span>Notice these types</span><input type="text" data-k="visitor_types" maxlength="95" spellcheck="false"></div>
+    <p class="hint">Aircraft type codes, separated by commas. One of these coming into view gets a notice at the top of the scope; military aircraft always do.</p>
   </section>
 
   <section>
@@ -77,6 +95,13 @@
     <p class="hint">The source is a tile address with {z}, {x} and {y} in it. The default, OpenStreetMap, needs no key; its credit must stay visible.</p>
   </section>
 
+  <section>
+    <h2>Control from elsewhere</h2>
+    <div class="row"><span>Control key</span><input type="text" id="keynew" maxlength="24" spellcheck="false" autocomplete="off" placeholder="letters, digits, - _ ." style="flex:0 1 14em"><button id="keyset">Set</button><button id="keyclear">Remove</button><small id="keystate"></small></div>
+    <p class="hint">Optional. With a key set, changing anything needs it: this page asks for it once, and other things on your network add <code>&amp;key=…</code> to their requests. It is a simple lock for a home network, sent unencrypted like everything else here. Forgotten it? Press the radar's button five times quickly to remove it.</p>
+    <p class="hint">Control from elsewhere (a Stream Deck key, a home-automation rule): open an address such as <code id="doex"></code>. More than one thing can go in one address. Names: <code>page</code> (radar, weather, board, log, next), <code>press</code> (short, double, long), <code>range</code> (a number, or next), <code>brightness</code>, <code>alert</code> (look, home, test), <code>select</code> (a callsign), and any switch on this page by its name with on, off or toggle (for example <code>map=toggle</code>). The switch names are in <a href="/api/settings">/api/settings</a>.</p>
+  </section>
+
   <section id="device" hidden>
     <h2>Device</h2>
     <div class="row"><span>Firmware</span><span id="fw"></span></div>
@@ -93,14 +118,29 @@
 <script>
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const NAMES = {sweep:'Sweep', rings:'Range rings', labels:'Callsigns', altitude:'Altitude', trails:'Trails', fade:'Fade after sweep',
-  shapes:'Aircraft shapes', auto_cycle:'Cycle through aircraft', tag:'Tag box', tag_route:'Tag: route', tag_type:'Tag: type',
-  tag_level:'Tag: level', tag_speed:'Tag: speed', card:'Large card', map:'Map', declutter:'Avoid overlapping labels', logos:'Airline logos'};
+  shapes:'Aircraft shapes', auto_cycle:'Cycle through aircraft', tag:'Tag box', tag_route:'Tag: route', tag_type:'Tag: type', type_names:'Type in words (A380-800 for A388)',
+  tag_level:'Tag: level', tag_speed:'Tag: speed', card:'Large card', map:'Map', declutter:'Avoid overlapping labels', logos:'Airline logos', clock:'Clock', alerts:'Emergency alerts (7700, anywhere)', visitors:'Unusual visitor notice', visitor_heli:'Notice helicopters too',
+  auto_range:'Range follows nearest aircraft', page_weather:'Weather page', page_board:'Airport board page', page_log:'Overhead log page'};
 let cfg = {};
+
+// Every request carries the control key, if this browser has been given one. A refusal asks for it (once per request).
+let key = ''; try { key = localStorage.getItem('radarmash-key') || ''; } catch (e) {}
+function rememberKey(k) { key = k; try { k ? localStorage.setItem('radarmash-key', k) : localStorage.removeItem('radarmash-key'); } catch (e) {} }
+async function ask(url, opt = {}) {
+  const go = () => fetch(url, {...opt, headers: {...(opt.headers || {}), ...(key ? {'X-Key': key} : {})}});
+  let r = await go();
+  if (r.status === 401) {
+    const k = prompt('This radar has a control key. Enter it to change settings:');
+    if (k) { rememberKey(k.trim()); r = await go(); }
+  }
+  return r;
+}
+const hm = m => String(m / 60 | 0).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
 
 function flash() { const s = $('#saved'); s.classList.add('on'); clearTimeout(flash.t); flash.t = setTimeout(() => s.classList.remove('on'), 900); }
 async function send(change) {
   try {
-    const r = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(change)});
+    const r = await ask('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(change)});
     if (r.ok) { cfg = await r.json(); fill(); flash(); }
   } catch (e) { $('#status').textContent = 'not reachable'; }
 }
@@ -113,11 +153,22 @@ function fill() {
   for (const el of $$('[data-show]')) el.textContent = cfg[el.dataset.show] + '%';
   for (const el of $$('[data-secs]')) el.textContent = 'once round in ' + cfg[el.dataset.secs] + ' s';
   for (const el of $$('#toggles input')) el.checked = !!cfg[el.name];
+  $('#utcoff').hidden = !!cfg.utc_auto;
+  for (const el of $$('[data-time]')) if (el !== document.activeElement && cfg[el.dataset.time] !== undefined) el.value = hm(cfg[el.dataset.time]);
+  $('#nighttimes').hidden = cfg.night !== 2; $('#nightrow').hidden = !cfg.night;
+  $('#keystate').textContent = cfg.api_key_set ? 'a key is set' : 'no key: anyone on your network can change settings';
+  $('#keyclear').hidden = !cfg.api_key_set;
+  $('#doex').textContent = location.origin + '/api/do?page=weather' + (cfg.api_key_set ? '&key=…' : '');
   if (document.activeElement !== $('#lat') && document.activeElement !== $('#lon') && cfg.home_set) { $('#lat').value = cfg.home_lat; $('#lon').value = cfg.home_lon; }
   if (pick.el) pickDraw();
   $('#homehint').textContent = cfg.home_set ? '' : 'No position set yet, so live aircraft cannot be shown. It is stored on the radar only.';
 }
 function build() {
+  for (let m = -720; m <= 840; m += 30) {                 // UTC-12:00 to UTC+14:00
+    const a = Math.abs(m), o = document.createElement('option');
+    o.value = m; o.textContent = 'UTC' + (m < 0 ? '−' : '+') + String(a / 60 | 0).padStart(2, '0') + ':' + String(a % 60).padStart(2, '0');
+    $('#utcoff').append(o);
+  }
   for (const k of Object.keys(NAMES)) {
     if (!(k in cfg)) continue;
     const l = document.createElement('label'), c = document.createElement('input');
@@ -135,13 +186,25 @@ function build() {
       if (t) t.textContent = 'once round in ' + el.value + ' s';
     });
   }
+  for (const el of $$('[data-time]')) el.addEventListener('change', () => {
+    const [h, m] = el.value.split(':').map(Number);
+    if (h >= 0 && m >= 0) send({[el.dataset.time]: h * 60 + m});
+  });
+  for (const b of $$('[data-do]')) b.onclick = async () => { await ask('/api/do?' + b.dataset.do); status(); };
+  $('#keyset').onclick = async () => {
+    const k = $('#keynew').value.trim();
+    if (!/^[A-Za-z0-9._-]{4,24}$/.test(k)) { $('#keystate').textContent = 'Use 4 to 24 letters, digits, dashes, underscores or full stops.'; return; }
+    await send({api_key: k});
+    if (cfg.api_key_set) { rememberKey(k); $('#keynew').value = ''; }
+  };
+  $('#keyclear').onclick = async () => { if (!confirm('Remove the control key? Anyone on your network will be able to change settings again.')) return; await send({api_key: ''}); if (!cfg.api_key_set) rememberKey(''); };
   for (const b of $$('[data-post]')) b.onclick = async () => {
     if (b.dataset.confirm && !confirm(b.dataset.confirm)) return;
-    await fetch(b.dataset.post, {method:'POST'}); setTimeout(load, 400);
+    await ask(b.dataset.post, {method:'POST'}); setTimeout(load, 400);
   };
   $('#keep').onclick = async () => {
     if (!confirm('Keep this firmware permanently?\n\nAfter this, a restart or power cycle will no longer return to the previous firmware. Only do it once this firmware has been working well on your Wi-Fi.')) return;
-    await fetch('/api/keep', {method:'POST'}); status();
+    await ask('/api/keep', {method:'POST'}); status();
   };
   $('#fwgo').onclick = async () => {
     const f = $('#fwfile').files[0], msg = $('#fwmsg');
@@ -149,7 +212,7 @@ function build() {
     if (!confirm('Upload ' + f.name + '?\n\nThe firmware running now becomes the permanent fallback, replacing whatever is in the other slot (including the original firmware, if that is what is there). The new firmware then starts on trial.')) return;
     $('#fwgo').disabled = true; msg.textContent = 'Uploading ' + Math.round(f.size / 1024) + ' KB… do not unplug the radar.';
     try {
-      const r = await fetch('/ota', {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:f});
+      const r = await ask('/ota', {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:f});
       const j = await r.json();
       msg.textContent = j.ok ? 'Uploaded and checked. The radar is restarting into the new firmware; this page will reconnect.' : 'Not accepted: ' + (j.msg || 'unknown error') + '. Nothing was changed if it failed before writing.';
     } catch (e) { msg.textContent = 'The upload did not complete. The firmware running now is untouched and still in charge.'; }
@@ -211,12 +274,12 @@ function pickSetup() {
 }
 
 async function fonts() {
-  try { for (const f of await (await fetch('/api/fonts')).json()) $('#font').add(new Option(f.name, f.id)); } catch (e) {}
+  try { for (const f of await (await ask('/api/fonts')).json()) $('#font').add(new Option(f.name, f.id)); } catch (e) {}
 }
-async function load() { try { cfg = await (await fetch('/api/settings')).json(); fill(); } catch (e) {} }
+async function load() { try { cfg = await (await ask('/api/settings')).json(); fill(); } catch (e) {} }
 async function status() {
   try {
-    const s = await (await fetch('/api/status')).json();
+    const s = await (await ask('/api/status')).json();
     const bits = [s.live ? (s.aircraft + ' aircraft' + (s.feed_age_s >= 0 ? ', updated ' + s.feed_age_s + ' s ago' : ', waiting for data')) : 'demo traffic'];
     if (s.feed_error) bits.push(s.feed_error);
     if (s.map_missing > 0) bits.push(s.map_missing + ' map tiles missing');
@@ -229,6 +292,7 @@ async function status() {
       $('#keeprow').hidden = !!s.confirmed;
       $('#bootnote').textContent = s.confirmed ? '' : 'This firmware is on trial: a restart or power cycle returns to the previous firmware.';
     }
+    if (s.page) $('#pagenow').textContent = 'showing: ' + s.page + (s.night ? ' · dimmed for the night' : '');
     if (s.range_km && document.activeElement !== $('[data-k="range_km"]')) $('[data-k="range_km"]').value = String(s.range_km);
   } catch (e) { $('#status').textContent = 'not reachable'; }
 }

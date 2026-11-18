@@ -18,6 +18,7 @@
 #include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
+#include <LittleFS.h>
 #include <PNGdec.h>
 #include <Preferences.h>
 #include <WebServer.h>
@@ -33,9 +34,12 @@
 #include <mbedtls/sha256.h>
 
 #include "admin_html.h"
+#include "alert.h"
 #include "config.h"
+#include "control.h"
 #include "feed.h"
 #include "panel_init.h"
+#include "pages.h"
 #include "radar.h"
 #include "wifi_html.h"
 #if __has_include("secrets.h")
@@ -67,6 +71,16 @@ static void touch();                                // marks deliberate use of t
 static uint32_t frame_ms = 0, frames = 0;
 static int brightness = 1023;
 static char boot_note[40] = "", note2[34] = "", note3[34] = "";   // up to three lines of message over the radar
+static bool live_mode = false;
+static Watch watch;                                 // the worldwide emergency watch (see alert.h); guarded by the radar lock
+static bool clock_auto = true, zone_known = false;  // the clock: time zone from the position, and whether it has been found yet
+static int clock_offset_min = 0, zone_min = 0;
+static PageData pages;                              // what the weather, board and log pages draw from; guarded by the radar lock
+static Visitors visitors;                           // notices for unusual aircraft; guarded by the radar lock
+static Button button;
+static char api_key_now[25] = "";                   // the control key in force (a copy of the setting; empty for none)
+static char visitor_types[96] = "";
+static uint16_t page_cycle_s = 0;
 
 // True only if the external memory chip really answered and is usable as heap (the Arduino flag alone is not proof).
 static bool psramOk() { return esp_psram_is_initialized() && heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0; }
@@ -197,7 +211,17 @@ static void drawFrame(bool demo) {
   uint32_t t0 = millis();
   frame_ms = t0 - last_start; last_start = t0;             // time from one frame to the next, sending included
   Lock lock;
-  if (demo) demoTraffic(radar, t0);
+  if (demo) {
+    demoTraffic(radar, t0);
+    static uint32_t noted = 0;
+    if (t0 - noted > 2000) { noted = t0; pages.seen.note(radar, (long long)time(nullptr), t0); }
+  }
+  watch.tick(radar, t0, radar.set.alerts && live_mode);
+  visitors.tick(radar, t0, radar.set.visitors);
+  pageTick(radar, watch, page_cycle_s, t0);
+  pages.utc_offset_min = clock_auto ? (zone_known ? zone_min : 0) : clock_offset_min;
+  radar.clock_min = (int16_t)clockMinutes((long long)time(nullptr), clock_auto ? (zone_known ? zone_min : 0) : clock_offset_min);
+  radar.clock_utc = clock_auto && !zone_known;       // zone not found yet: UTC, marked Z
   radar.tick(t0);
   radar.prepare();
   for (int y0 = 0; y0 < SCREEN_H; y0 += BAND_ROWS) {
@@ -240,7 +264,6 @@ static void goHome() {
 }
 
 // ---- live data (its own task, so a slow reply never freezes the sweep) ----
-static bool live_mode = false;
 static int refresh_s = 5;
 static int feed_count = -1, feed_errors = 0, feed_failing = 0, lookups = 0;
 static uint32_t feed_ok_ms = 0;
@@ -278,7 +301,7 @@ static bool httpsGet(const String &url, String &body) {
 
 static void pollFeed() {
   double lat, lon; int nm, limit;
-  { Lock lock; lat = radar.home_lat; lon = radar.home_lon; nm = feedRadiusNm(radar.range_km); limit = constrain((int)radar.set.max_aircraft, 1, MAX_AIRCRAFT); }
+  { Lock lock; lat = radar.home_lat; lon = radar.home_lon; nm = feedRadiusNm(radar.feedRangeKm()); limit = constrain((int)radar.set.max_aircraft, 1, MAX_AIRCRAFT); }
   String url, url_before;
   { Lock lock; url = url_before = feed_url; }
   url.replace("{lat}", String(lat, 4)); url.replace("{lon}", String(lon, 4)); url.replace("{nm}", String(nm));
@@ -286,6 +309,7 @@ static void pollFeed() {
   int n = httpsGet(url, body) ? parseAircraft(body.c_str(), body.length(), lat, lon, include_ground, fresh, limit) : -1;
   body = String();
   Lock lock;
+  if (radar.home_lat != lat || radar.home_lon != lon) return;   // the scope moved while this was being fetched: wrong sky
   if (n < 0) {
     feed_errors++;
     if (++feed_failing >= 2 && feed_url == url_before) {
@@ -302,6 +326,10 @@ static void pollFeed() {
     memcpy(fresh[i].dest, e->info.dest, sizeof fresh[i].dest);
   }
   radar.update(fresh, n, millis());
+  if (!watch.away) {                                 // what has been seen from home, and anything unusual among it
+    pages.seen.note(radar, (long long)time(nullptr), millis());
+    if (radar.set.visitors) visitors.check(radar, visitor_types, radar.set.visitor_heli, millis());
+  }
   feed_count = n; feed_ok_ms = millis(); feed_failing = 0;
 }
 
@@ -380,6 +408,160 @@ static void lookupOneRoute() {
   }
 }
 
+static bool fetchBytes(const String &url, uint8_t *&data, int &len);
+
+// ---- the emergency watch and the time zone ----
+static uint32_t watched_ms = 0, watch_test_until = 0, zone_ms = 0;
+static int watch_polls = 0;
+static Aircraft *watch_list = nullptr;
+static const int WATCH_LIST = 8;
+
+static void watchWorld() {
+  bool want; double lat, lon;
+  uint32_t now = millis();
+  { Lock lock; want = radar.set.alerts && live_mode && !(watch_test_until && (int32_t)(now - watch_test_until) < 0);
+    lat = watch.away ? watch.back_lat : radar.home_lat; lon = watch.away ? watch.back_lon : radar.home_lon; }
+  if (!want || (watched_ms && now - watched_ms < (uint32_t)WATCH_EVERY_S * 1000UL)) return;
+  watched_ms = now | 1;
+  if (!watch_list) {
+    watch_list = (Aircraft *)heap_caps_malloc(sizeof(Aircraft) * WATCH_LIST, psramOk() ? MALLOC_CAP_SPIRAM : MALLOC_CAP_DEFAULT);
+    if (!watch_list) return;
+    for (int i = 0; i < WATCH_LIST; i++) new (&watch_list[i]) Aircraft();
+  }
+  String body;
+  int n = httpsGet(WATCH_ADSB_FI, body) ? parseAircraft(body.c_str(), body.length(), lat, lon, false, watch_list, WATCH_LIST) : -1;
+  if (n < 0) { body = String(); n = httpsGet(WATCH_ADSB_LOL, body) ? parseAircraft(body.c_str(), body.length(), lat, lon, false, watch_list, WATCH_LIST) : -1; }
+  body = String();
+  if (n < 0) return;                                 // no answer is not the same as all clear
+  for (int i = 1; i < n; i++)                        // the nearest to home is the one offered
+    if (distanceKm(lat, lon, watch_list[i].lat, watch_list[i].lon) < distanceKm(lat, lon, watch_list[0].lat, watch_list[0].lon)) {
+      Aircraft t = watch_list[0]; watch_list[0] = watch_list[i]; watch_list[i] = t;
+    }
+  Lock lock;
+  watch_polls++;
+  if (!(watch_test_until && (int32_t)(millis() - watch_test_until) < 0)) watch.found(watch_list, n);
+}
+
+// The weather where the radar is, and with it the time zone: asked for when the position changes and every quarter of
+// an hour after that. One small request serves the clock, the weather page and dimming at sunset.
+static bool zone_wanted = false;
+static double zone_lat = 0, zone_lon = 0, zone_for_lat = 1e9, zone_for_lon = 1e9;
+static int weather_fetches = 0;
+static void lookupZone() {
+  bool want; double lat, lon;
+  { Lock lock; want = zone_wanted; lat = zone_lat; lon = zone_lon; if (!want) { zone_known = false; pages.wx = Weather(); } }
+  bool moved = lat != zone_for_lat || lon != zone_for_lon;
+  uint32_t now = millis();
+  if (!want || (!moved && zone_ms && now - zone_ms < (uint32_t)WEATHER_EVERY_S * 1000UL)) return;
+  zone_for_lat = lat; zone_for_lon = lon;
+  String url = WEATHER_OPEN_METEO, body;
+  url.replace("{lat}", String(lat, 2)); url.replace("{lon}", String(lon, 2));     // to about a kilometre: all the weather needs
+  Weather fresh_wx;
+  bool ok = httpsGet(url, body) && parseWeather(body.c_str(), body.length(), fresh_wx);
+  body = String();
+  Lock lock;
+  if (ok) { pages.wx = fresh_wx; zone_known = true; zone_min = fresh_wx.utc_offset_min; zone_ms = now | 1; weather_fetches++; }
+  else { if (moved) { zone_known = false; pages.wx = Weather(); } zone_ms = (now - (uint32_t)(WEATHER_EVERY_S - 300) * 1000UL) | 1; }   // try again in five minutes
+}
+
+// ---- keeping map tiles and logos across restarts ----
+// The device has a small filesystem that the original firmware also uses. RadarMASH keeps its downloads there in a
+// folder of its own, within a fixed allowance, and never formats or touches anything else: if the filesystem cannot be
+// opened as it stands, there is simply no cache.
+static bool fs_ok = false;
+static uint32_t cache_bytes = 0;
+static int cache_files = 0, cache_hits = 0, cache_writes = 0, cache_evictions = 0;
+static const uint32_t CACHE_MAX_BYTES = 1536UL * 1024UL, CACHE_KEEP_FREE = 512UL * 1024UL;
+static const time_t CACHE_STALE_S = 30L * 24L * 3600L;      // older than this: fetch a fresh copy when the network allows
+
+// How much of the filesystem is free. Working it out walks the whole filesystem, which takes a third of a second or
+// more, so it is done only here, on the feed task, when our files change: never from the loop that draws the screen.
+// (The status page used to ask each time, and every request froze the sweep.)
+static uint32_t fs_free_bytes = 0;
+static uint32_t fsFree() { return fs_free_bytes = LittleFS.totalBytes() - LittleFS.usedBytes(); }
+
+static uint32_t hashText(const String &s) { uint32_t h = 2166136261u; for (size_t i = 0; i < s.length(); i++) h = (h ^ (uint8_t)s[i]) * 16777619u; return h; }
+
+static void cacheSetup() {
+  fs_ok = LittleFS.begin(false, "/fs", 6, "storage");       // false: never format
+  if (!fs_ok) return;
+  LittleFS.mkdir("/rm");
+  File dir = LittleFS.open("/rm");
+  if (!dir || !dir.isDirectory()) { fs_ok = false; return; }
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) { cache_bytes += f.size(); cache_files++; }
+  fsFree();
+}
+
+// Reads a kept file into PSRAM. `stale` says it is old enough to be worth replacing.
+static bool cacheRead(const char *path, uint8_t *&data, int &len, bool &stale) {
+  stale = false;
+  if (!fs_ok) return false;
+  File f = LittleFS.open(path, "r");
+  if (!f) return false;
+  len = (int)f.size();
+  time_t written = f.getLastWrite(), now = time(nullptr);
+  bool ok = len > 0 && len <= 300000 && (data = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM)) != nullptr;
+  if (ok && (int)f.read(data, len) != len) { heap_caps_free(data); data = nullptr; ok = false; }
+  f.close();
+  if (ok) { cache_hits++; stale = now > 1700000000 && written > 1700000000 && now - written > CACHE_STALE_S; }
+  return ok;
+}
+
+static void cacheRemove(const char *path) {
+  if (!fs_ok) return;
+  File f = LittleFS.open(path, "r");
+  if (!f) return;
+  uint32_t size = f.size();
+  f.close();
+  if (LittleFS.remove(path)) { cache_bytes -= size > cache_bytes ? cache_bytes : size; if (cache_files) cache_files--; fs_free_bytes += size; }   // near enough until the next count
+}
+
+static bool cacheEvictOldest() {
+  File dir = LittleFS.open("/rm");
+  if (!dir) return false;
+  String oldest; time_t when = 0;
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    time_t w = f.getLastWrite();
+    if (!oldest.length() || w < when) { oldest = String("/rm/") + f.name(); when = w; }
+  }
+  if (!oldest.length()) return false;
+  cacheRemove(oldest.c_str());
+  cache_evictions++;
+  return true;
+}
+
+static void cacheWrite(const char *path, const uint8_t *data, int len) {
+  if (!fs_ok || len <= 0 || (uint32_t)len > CACHE_MAX_BYTES / 4) return;
+  cacheRemove(path);                                 // replacing a stale copy
+  for (int guard = 0; guard < 64; guard++) {         // make room within our allowance, leaving the rest of the filesystem alone
+    uint32_t free_bytes = fsFree();
+    if (cache_bytes + (uint32_t)len <= CACHE_MAX_BYTES && free_bytes >= CACHE_KEEP_FREE + (uint32_t)len) break;
+    if (!cacheEvictOldest()) return;
+  }
+  if (cache_bytes + (uint32_t)len > CACHE_MAX_BYTES || fs_free_bytes < CACHE_KEEP_FREE + (uint32_t)len) return;
+  File f = LittleFS.open(path, "w");
+  if (!f) return;
+  bool ok = (int)f.write(data, len) == len;
+  f.close();
+  if (ok) { cache_bytes += len; cache_files++; cache_writes++; fs_free_bytes -= (uint32_t)len > fs_free_bytes ? fs_free_bytes : (uint32_t)len; }
+  else LittleFS.remove(path);
+}
+
+// A download, or the kept copy of it. A stale copy is replaced if the network obliges and used if it does not.
+static bool fetchCached(const char *path, const String &url, uint8_t *&data, int &len, bool keep, bool &from_cache) {
+  bool stale = false;
+  from_cache = cacheRead(path, data, len, stale);
+  if (from_cache && !stale) return true;
+  uint8_t *fresh_data = nullptr; int fresh_len = 0;
+  if (WiFi.status() == WL_CONNECTED && fetchBytes(url, fresh_data, fresh_len)) {
+    if (from_cache) heap_caps_free(data);
+    data = fresh_data; len = fresh_len; from_cache = false;
+    if (keep) cacheWrite(path, data, len);
+    return true;
+  }
+  return from_cache;
+}
+
 // ---- map underlay (needs PSRAM) ----
 // Tiles are fetched over HTTPS as PNG, decoded one at a time, and composed into a picture the radar draws over. Raw
 // tiles are kept in memory while the device is up, so changing range and coming back does not download them again.
@@ -431,6 +613,7 @@ static bool fetchBytes(const String &url, uint8_t *&data, int &len) {
 }
 
 struct DeviceTiles : TileSource {
+  char last_path[48];
   const uint16_t *tile(int z, int x, int y) override {
     RawTile *t = nullptr;
     for (RawTile &r : raw_tiles) if (r.data && r.z == z && r.x == x && r.y == y) { t = &r; break; }
@@ -438,8 +621,11 @@ struct DeviceTiles : TileSource {
       String url = map_url;
       url.replace("{z}", String(z)); url.replace("{x}", String(x)); url.replace("{y}", String(y)); url.replace("{s}", "a");
       uint8_t *data = nullptr; int len = 0;
-      if (!fetchBytes(url, data, len)) { map_tiles_failed++; return nullptr; }
-      map_tiles_fetched++;
+      bool cached = false, keep;
+      { Lock lock; keep = !watch.away; }                     // a visit to an emergency somewhere is not worth keeping
+      snprintf(last_path, sizeof last_path, "/rm/t%08x_%d_%d_%d", (unsigned)hashText(map_url), z, x, y);
+      if (!fetchCached(last_path, url, data, len, keep, cached)) { map_tiles_failed++; return nullptr; }
+      if (!cached) map_tiles_fetched++;
       t = &raw_tiles[raw_next]; raw_next = (raw_next + 1) % (int)(sizeof raw_tiles / sizeof raw_tiles[0]);
       if (t->data) heap_caps_free(t->data);
       *t = RawTile{z, x, y, data, len};
@@ -449,7 +635,11 @@ struct DeviceTiles : TileSource {
       ok = png->getWidth() == TILE_SIZE && png->getHeight() == TILE_SIZE && png->decode(nullptr, 0) == PNG_SUCCESS;
       png->close();
     }
-    if (!ok) { map_decode_failed++; heap_caps_free(t->data); t->data = nullptr; }   // do not keep a tile we cannot read
+    if (!ok) {                                               // do not keep a tile we cannot read, in memory or in flash
+      map_decode_failed++; heap_caps_free(t->data); t->data = nullptr;
+      snprintf(last_path, sizeof last_path, "/rm/t%08x_%d_%d_%d", (unsigned)hashText(map_url), z, x, y);
+      cacheRemove(last_path);
+    }
     return ok ? tile_px : nullptr;
   }
 };
@@ -558,7 +748,10 @@ static void fetchOneLogo() {
   url.replace("{icao}", icao);
   uint8_t *data = nullptr; int len = 0;
   Logo *made = nullptr;
-  if (fetchBytes(url, data, len)) {
+  char path[40];
+  bool cached = false, online = WiFi.status() == WL_CONNECTED;
+  snprintf(path, sizeof path, "/rm/l%08x_%s", (unsigned)hashText(tmpl), icao);
+  if (fetchCached(path, url, data, len, true, cached)) {
     if (png->openRAM(data, len, logoLine) == PNG_SUCCESS) {
       LogoJob job{nullptr, png->getWidth(), png->getHeight(), true};
       if (job.w >= 1 && job.h >= 1 && job.w <= 320 && job.h <= 320 && (job.rgba = (uint8_t *)heap_caps_calloc((size_t)job.w * job.h, 4, MALLOC_CAP_SPIRAM)) != nullptr) {
@@ -571,7 +764,9 @@ static void fetchOneLogo() {
       png->close();
     }
     heap_caps_free(data);
+    if (!made) cacheRemove(path);                            // not a picture we can use: do not keep it
   }
+  if (!made && !online) return;                              // no network yet: that is not the same as having no logo
   Lock lock;
   for (DeviceLogos::Entry &e : device_logos.entries) {
     if (e.state != DeviceLogos::WANTED || strcmp(e.icao, icao) != 0) continue;
@@ -588,7 +783,8 @@ static void feedTask(void *) {
   for (int i = 0; fresh && i < MAX_AIRCRAFT; i++) new (&fresh[i]) Aircraft();
   for (;;) {
     uint32_t began = millis();
-    if (WiFi.status() == WL_CONNECTED) { updateMap(); fetchOneLogo(); }
+    updateMap(); fetchOneLogo();                             // these can work from the kept copies before Wi-Fi is up
+    if (WiFi.status() == WL_CONNECTED) { lookupZone(); watchWorld(); }
     if (fresh && live_mode && WiFi.status() == WL_CONNECTED) { pollFeed(); lookupOneRoute(); }
     uint32_t every = (uint32_t)constrain(refresh_s, 2, 300) * 1000UL, took = millis() - began;
     vTaskDelay(pdMS_TO_TICKS(took < every ? every - took : 200));
@@ -759,6 +955,7 @@ static void otaRaw(bool dry) {                      // dry comes from the route:
     if (ota.begun) esp_ota_abort(ota.h);
     ota.active = true; ota.dry = dry; ota.failed = false; ota.begun = false; ota.ok = false; ota.total = 0; ota.msg = "";
     if (viaSetupAp()) otaFail("updates are not accepted over the setup hotspot");   // it is open: anyone nearby could be on it
+    else if (!keyOk(api_key_now, server.header("X-Key").c_str())) otaFail("the control key is needed (send it as an X-Key header)");
     mbedtls_sha256_init(&ota.sha); mbedtls_sha256_starts(&ota.sha, 0);
   } else if (r.status == RAW_WRITE) {
     if (ota.failed || !r.currentSize) return;
@@ -818,6 +1015,16 @@ static uint32_t cfg_dirty_ms = 0;
 static uint32_t fps = 0;
 
 static void applyConfig() {                         // caller holds the lock (or nothing else is running yet)
+  watch.comeHome(radar);                            // settings are about home: if the scope is away at an emergency, come back
+  clock_auto = cfg.utc_auto; clock_offset_min = cfg.utc_offset_min;
+  // The weather service is only asked when something needs it: the clock's zone, the weather page or dimming by the sun.
+  zone_wanted = cfg.home_set && (cfg.utc_auto || cfg.set.page_weather || cfg.night == 1); zone_lat = cfg.home_lat; zone_lon = cfg.home_lon;
+  pages.wx_wanted = zone_wanted; pages.units = cfg.units; pages.overhead_km = cfg.overhead_km;
+  snprintf(pages.airport, sizeof pages.airport, "%s", cfg.board_airport);
+  snprintf(api_key_now, sizeof api_key_now, "%s", cfg.api_key);
+  snprintf(visitor_types, sizeof visitor_types, "%s", cfg.visitor_types);
+  page_cycle_s = cfg.page_cycle_s;
+  radar.pages = &pages;
   bool was_live = live_mode, moved = radar.home_lat != cfg.home_lat || radar.home_lon != cfg.home_lon;
   radar.set = cfg.set;
   radar.home_lat = cfg.home_lat; radar.home_lon = cfg.home_lon;
@@ -832,18 +1039,31 @@ static void applyConfig() {                         // caller holds the lock (or
   if (was_live != live_mode || moved) { radar.count = 0; radar.selected = -1; feed_count = -1; feed_ok_ms = 0; }   // a different sky
   brightness = cfg.brightness * 1023 / 100;
 }
+// The backlight follows the setting, or the night setting when it is night. Called on a change and once a second.
+static bool night_now = false;
+static void applyBacklight() {
+  int clock_min; Weather wx;
+  { Lock lock; clock_min = radar.clock_min; wx = pages.wx; }
+  night_now = isNight(cfg.night, clock_min, wx, cfg.night_start_min, cfg.night_end_min);
+  int want = (night_now ? cfg.night_brightness : cfg.brightness) * 1023 / 100;
+  if (want != brightness) setBacklight(want);
+}
 static void markDirty() { cfg_dirty = true; cfg_dirty_ms = millis(); }
 
-static size_t currentConfigJson(char *buf, size_t n) {   // caller holds the lock
-  cfg.set = radar.set; cfg.range_km = radar.range_km;    // the button changes these behind the page's back
-  return configToJson(cfg, buf, n);
+static size_t currentConfigJson(char *buf, size_t n, bool for_saving = false) {   // caller holds the lock
+  cfg.set = radar.set;                                   // the button changes these behind the page's back
+  if (!watch.away) cfg.range_km = radar.range_km;        // (the range while away at an emergency is not the user's choice)
+  return configToJson(cfg, buf, n, for_saving);          // only the saved copy holds the control key
 }
 static void saveConfigIfDue() {
   if (!cfg_dirty || millis() - cfg_dirty_ms < 3000) return;
   char buf[CONFIG_JSON_MAX];
   size_t n;
-  { Lock lock; n = currentConfigJson(buf, sizeof buf); }
-  if (n) prefs.putString("config", buf);
+  { Lock lock; n = currentConfigJson(buf, sizeof buf, true); }
+  static uint32_t saved_sum = 0;                         // nothing changed (a page switch, say): spare the flash a write
+  uint32_t sum = 2166136261u;
+  for (size_t i = 0; i < n; i++) sum = (sum ^ (uint8_t)buf[i]) * 16777619u;
+  if (n && sum != saved_sum) { prefs.putString("config", buf); saved_sum = sum; }
   cfg_dirty = false;
 }
 static void loadConfig() {
@@ -855,6 +1075,14 @@ static void loadConfig() {
 
 // ---- web ----
 static void touch() { last_activity_ms = millis(); }
+// The control key, if one is set: as ?key=... or an X-Key header. Sends the refusal itself.
+static bool allowed() {
+  if (!api_key_now[0]) return true;
+  String k = server.hasArg("key") ? server.arg("key") : server.header("X-Key");
+  if (keyOk(api_key_now, k.c_str())) return true;
+  server.send(401, "application/json", "{\"error\":\"key needed\"}");
+  return false;
+}
 static void ok() { server.send(200, "text/plain", "ok"); }
 
 // Timings averaged since the last call: where a frame's time goes, and how much of the screen is being sent.
@@ -889,6 +1117,12 @@ static void hStatus() {
   j += ",\"map_tiles\":" + String(map_tiles_fetched) + ",\"map_tile_failures\":" + String(map_tiles_failed) + ",\"map_decode_failures\":" + String(map_decode_failed);
   j += ",\"time_set\":" + String(time(nullptr) > 1700000000 ? "true" : "false") + ",\"verify_certs\":" + String(verify_certs ? "true" : "false");
   j += ",\"logos\":" + String(logos_loaded) + ",\"logos_missing\":" + String(logos_missing);
+  j += ",\"fs\":" + String(fs_ok ? "true" : "false") + ",\"cache_files\":" + String(cache_files) + ",\"cache_kb\":" + String(cache_bytes / 1024) + ",\"cache_hits\":" + String(cache_hits);
+  j += ",\"cache_writes\":" + String(cache_writes) + ",\"cache_evictions\":" + String(cache_evictions) + ",\"fs_free_kb\":" + String(fs_ok ? (unsigned)(fs_free_bytes / 1024) : 0);
+  j += ",\"emergency\":\"" + String(watch.have ? watch.target.callsign : "") + "\",\"away\":" + String(watch.away ? "true" : "false") + ",\"watch_polls\":" + String(watch_polls) + ",\"why_home\":\"" + String(watch.why_home) + "\"";
+  j += ",\"page\":\"" + String(pageName((Page)radar.page)) + "\",\"night\":" + String(night_now ? "true" : "false") + ",\"weather\":" + String(pages.wx.have ? "true" : "false") +
+       ",\"weather_fetches\":" + String(weather_fetches) + ",\"sightings\":" + String(pages.seen.n) + ",\"key_set\":" + String(api_key_now[0] ? "true" : "false");
+  j += ",\"zone_min\":" + String(zone_known ? zone_min : -9999);
   j += ",\"panel_err\":" + String((int)panel_err) + ",\"cache\":" + String(radar.cache ? "true" : "false");
   j += ",\"psram\":" + String(psramOk() ? "true" : "false") + ",\"psram_free\":" + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   j += ",\"reset_reason\":" + String((int)esp_reset_reason()) + ",\"uptime_ms\":" + String(millis());
@@ -908,18 +1142,66 @@ static void hSettingsPost() {
   bool good;
   {
     Lock lock;
-    cfg.set = radar.set; cfg.range_km = radar.range_km;
+    cfg.set = radar.set;
+    if (!watch.away) cfg.range_km = radar.range_km;
     good = configFromJson(body.c_str(), body.length(), cfg);
     if (good) { applyConfig(); currentConfigJson(buf, sizeof buf); }
   }
   if (!good) { server.send(400, "application/json", "{\"error\":\"not JSON\"}"); return; }
-  setBacklight(brightness);
+  applyBacklight();
   markDirty();
   server.send(200, "application/json", buf);
 }
 static void hFonts() { char b[600]; fontsJson(b, sizeof b); server.send(200, "application/json", b); }
-static void hPress() { touch(); { Lock lock; radar.shortPress(); } ok(); }
-static void hHold() { touch(); { Lock lock; radar.longPress(); } markDirty(); ok(); }
+static void hPress() { touch(); { Lock lock; doPress(Press::Short, radar, watch, millis()); } ok(); }
+static void hDouble() { touch(); { Lock lock; doPress(Press::Double, radar, watch, millis()); } ok(); }
+static void hHold() { touch(); { Lock lock; doPress(Press::Long, radar, watch, millis()); } markDirty(); ok(); }
+// Emergencies are rare, so this pretends there is one (over New York, where there is always traffic) for three minutes,
+// to try the notice and the button.
+static void startAlertTest() {
+  Aircraft a;
+  snprintf(a.hex, sizeof a.hex, "test01"); snprintf(a.callsign, sizeof a.callsign, "TEST7700"); snprintf(a.squawk, sizeof a.squawk, "7700");
+  a.lat = 40.64; a.lon = -73.78; a.alt_ft = 12000; a.speed_kt = 250; a.track_deg = 40; a.shape = Shape::Narrow;
+  Lock lock;
+  watch.comeHome(radar, "test"); watch = Watch(); watch.found(&a, 1); watch_test_until = (millis() + 180000UL) | 1;
+}
+static void hAlertTest() { touch(); startAlertTest(); ok(); }
+
+// One-line control for other things on the network: /api/do?page=weather&brightness=40 (GET, POST or PUT). Each
+// name=value is carried out in turn; the first that makes no sense stops it. See core/control.h for the names.
+static void hDo() {
+  touch();
+  bool changed = false;
+  for (int i = 0; i < server.args(); i++) {
+    String name = server.argName(i), value = server.arg(i);
+    if (name == "key" || name == "plain") continue;
+    if (name == "alert" && value == "test") { startAlertTest(); continue; }
+    char json[96];
+    Cmd c;
+    {
+      Lock lock;
+      c = command(name.c_str(), value.c_str(), radar, watch, millis(), json, sizeof json);
+      if (c == Cmd::Settings) {
+        cfg.set = radar.set;
+        if (!watch.away) cfg.range_km = radar.range_km;
+        configFromJson(json, strlen(json), cfg);
+        applyConfig();
+        changed = true;
+      }
+    }
+    if (c == Cmd::Unknown || c == Cmd::Bad) {
+      char esc[40]; jsonEscape(name.substring(0, 16).c_str(), esc, sizeof esc);
+      server.send(400, "application/json", String("{\"error\":\"") + (c == Cmd::Unknown ? "no such control: " : "bad value for ") + esc + "\"}");
+      if (changed) { applyBacklight(); markDirty(); }
+      return;
+    }
+  }
+  applyBacklight();
+  markDirty();                                       // (a range or switch may have changed; saving the same thing again is skipped below)
+  char j[120];
+  { Lock lock; snprintf(j, sizeof j, "{\"ok\":true,\"page\":\"%s\",\"range_km\":%d,\"away\":%s}", pageName((Page)radar.page), (int)radar.range_km, watch.away ? "true" : "false"); }
+  server.send(200, "application/json", j);
+}
 
 // Exercise the external memory chip: write a pattern across a block, read it back, and time both.
 static void hPsramTest() {
@@ -994,6 +1276,7 @@ void setup() {
 
   radar_mu = xSemaphoreCreateMutex();
   radar.logos = &device_logos;
+  cacheSetup();
   loadConfig();                                                // saved settings, before anything is drawn
   if (psramOk()) {                                             // with the external memory, keep the still background ready
     void *mem = heap_caps_malloc(sizeof(ScopeCache), MALLOC_CAP_SPIRAM);
@@ -1054,29 +1337,39 @@ void setup() {
     if (viaSetupAp()) { server.sendHeader("Location", "http://192.168.4.1/wifi"); server.send(302, "text/plain", ""); }
     else server.send(404, "text/plain", "not found");
   });
+  // With a control key set, only looking is free (the pages themselves and the status); everything that changes
+  // something, or tells where the radar is, needs the key. The Wi-Fi setup calls stay open while the setup hotspot is
+  // up, or a radar that has lost its network could not be given a new one.
+  #define KEYED(h) ([]() { if (allowed()) h(); })
+  #define KEYED_UNLESS_SETUP(h) ([]() { if (portal || allowed()) h(); })
+  static const char *KEY_HEADER[] = {"X-Key"};
+  server.collectHeaders(KEY_HEADER, 1);
   server.on("/wifi", hWifiPage);
-  server.on("/api/wifi/scan", hWifiScan);
-  server.on("/api/wifi/status", hWifiStatus);
-  server.on("/api/wifi", HTTP_POST, hWifiJoin);
-  server.on("/api/wifi/portal", HTTP_POST, hWifiPortal);
-  server.on("/api/keep", HTTP_POST, hKeep);
-  server.on("/api/trial-again", HTTP_POST, hTrialAgain);
+  server.on("/api/wifi/scan", KEYED_UNLESS_SETUP(hWifiScan));
+  server.on("/api/wifi/status", KEYED_UNLESS_SETUP(hWifiStatus));
+  server.on("/api/wifi", HTTP_POST, KEYED_UNLESS_SETUP(hWifiJoin));
+  server.on("/api/wifi/portal", HTTP_POST, KEYED(hWifiPortal));
+  server.on("/api/keep", HTTP_POST, KEYED(hKeep));
+  server.on("/api/trial-again", HTTP_POST, KEYED(hTrialAgain));
   server.on("/", hUi);
   server.on("/api/status", hStatus);
   server.on("/status", hStatus);                       // older name, kept for scripts
-  server.on("/api/settings", HTTP_GET, hSettingsGet);
-  server.on("/api/settings", HTTP_POST, hSettingsPost);
+  server.on("/api/settings", HTTP_GET, KEYED(hSettingsGet));
+  server.on("/api/settings", HTTP_POST, KEYED(hSettingsPost));
   server.on("/api/fonts", hFonts);
-  server.on("/api/press", HTTP_POST, hPress);
-  server.on("/api/hold", HTTP_POST, hHold);
-  server.on("/api/reboot", HTTP_POST, hReboot);
-  server.on("/reboot", hReboot);
+  server.on("/api/do", KEYED(hDo));                    // any method: GET for a Stream Deck, PUT or POST for the tidy-minded
+  server.on("/api/press", HTTP_POST, KEYED(hPress));
+  server.on("/api/double", HTTP_POST, KEYED(hDouble));
+  server.on("/api/hold", HTTP_POST, KEYED(hHold));
+  server.on("/api/alert-test", HTTP_POST, KEYED(hAlertTest));
+  server.on("/api/reboot", HTTP_POST, KEYED(hReboot));
+  server.on("/reboot", KEYED(hReboot));
   server.on("/perf", hPerf);
-  server.on("/psramtest", hPsramTest);
-  server.on("/tlstest", hTlsTest);
-  server.on("/stay", hStay);
-  server.on("/stock", hStock);
-  server.on("/ota", HTTP_POST, hOtaDone, hOtaRaw);
+  server.on("/psramtest", KEYED(hPsramTest));
+  server.on("/tlstest", KEYED(hTlsTest));
+  server.on("/stay", KEYED(hStay));
+  server.on("/stock", KEYED(hStock));
+  server.on("/ota", HTTP_POST, hOtaDone, hOtaRaw);     // (the key is checked as the upload starts: see otaRaw)
   server.on("/ota/dry", HTTP_POST, hOtaDone, hOtaDryRaw);
   server.begin();
   xTaskCreatePinnedToCore(feedTask, "feed", 12288, nullptr, 1, nullptr, 0);
@@ -1090,20 +1383,23 @@ void setup() {
 }
 
 void loop() {
-  static uint32_t btn_change_ms = 0, btn_down_ms = 0;
-  static bool btn_raw_last = false, btn_down = false, long_done = false;
   server.handleClient();
   uint32_t now = millis();
 
-  bool raw = digitalRead(PIN_BTN) == LOW;                    // active low, 30 ms debounce
-  if (raw != btn_raw_last) { btn_raw_last = raw; btn_change_ms = now; }
-  if (raw != btn_down && now - btn_change_ms > 30) {
-    btn_down = raw; last_activity_ms = now;
-    if (btn_down) { btn_down_ms = now; long_done = false; }
-    else if (!long_done) { Lock lock; radar.shortPress(); }
+  const bool held = digitalRead(PIN_BTN) == LOW;             // active low
+  static bool was_held = false;
+  if (held != was_held) { was_held = held; last_activity_ms = now; }
+  Press press = button.feed(held, now);
+  if (press == Press::Reset) {                               // five quick presses: forget the control key
+    Lock lock;
+    cfg.api_key[0] = 0; api_key_now[0] = 0;
+    visitors.say("Control key", "removed", now, 6000);
+    markDirty();
+  } else if (press != Press::None) {
+    { Lock lock; doPress(press, radar, watch, now); }
+    if (press == Press::Long) markDirty();                   // the range is a setting
   }
-  if (btn_down && !long_done && now - btn_down_ms > 700) { long_done = true; { Lock lock; radar.longPress(); } markDirty(); }
-  if (btn_down && now - btn_down_ms > 8000) { snprintf(boot_note, sizeof boot_note, "back to other firmware"); drawFrame(!live_mode); delay(150); goHome(); }
+  if (button.heldMs(now) > 8000) { snprintf(boot_note, sizeof boot_note, "back to other firmware"); drawFrame(!live_mode); delay(150); goHome(); }
 
   drawFrame(!live_mode);
 
@@ -1115,6 +1411,7 @@ void loop() {
     const esp_partition_t *bp = esp_ota_get_boot_partition();
     armed_for_trial = !is_confirmed && bp && bp->address == running_p->address;
     saveConfigIfDue();
+    applyBacklight();                                                                 // night falls, or ends
   }
   // Unconfirmed and left alone: go back to the other firmware. Not while armed for another trial start, though: the
   // restart would boot this firmware again and re-arm the other one, quietly undoing the arming. (That happened: the

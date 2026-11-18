@@ -39,6 +39,9 @@ Named for Radar O'Reilly, who always heard the choppers first.
     <td align="center"><img src="docs/img/radar-sky.png" width="260" alt="Radar showing several aircraft with trails"><br><sub>Trails follow each aircraft's real path</sub></td>
     <td align="center"><img src="docs/img/radar-green.png" width="260" alt="Radar with a green-tinted map"><br><sub>Green map style</sub></td>
   </tr>
+  <tr>
+    <td align="center" colspan="3"><img src="docs/img/radar-alert.png" width="330" alt="Radar with a red flashing notice: 7700 KLG5, 17 km away, press to look; the aircraft is drawn in red"><br><sub>An emergency squawk (demo traffic), and the clock</sub></td>
+  </tr>
 </table>
 
 ## What it does
@@ -47,18 +50,47 @@ Named for Radar O'Reilly, who always heard the choppers first.
 - A rotating sweep with a fading trail, at a speed you choose.
 - Aircraft flash bright as the sweep passes and fade until it comes round again, like a real display.
 - Range rings, and five ranges from 10 to 160 km on the button.
+- The time of day, with the time zone worked out from where the radar is (or set by hand).
 - Around 30 to 40 frames a second on the device.
 
 **The aircraft, properly identified**
 - Live positions from free community feeds, gliding smoothly between updates.
 - Different shapes for light aircraft, single-aisle and twin-aisle airliners, helicopters and military aircraft.
 - A tag box that steps through the aircraft in view: callsign, route, type, level and speed, your choice of which.
+- Aircraft types as codes or in words: A388 or A380-800, one switch (about 190 common types; the rest keep their code).
 - Airline name, origin and destination, **checked for sense**. Route databases are often wrong, because flight numbers
   get reused. RadarMASH tests each route against where the aircraft is, which way it is heading and whether it is
   climbing or descending, asks a second source when the first does not fit, and shows nothing sooner than something wrong.
 - Trails that follow the path actually flown, turns included.
 - Labels that move out of each other's way when the sky gets busy.
-- Airline logos beside the flight, if you point it at a collection (none are bundled: see [Logos](#logos)).
+- Airline logos beside the flight, in the tag box and on the large card, if you point it at a collection (none are
+  bundled: see [Logos](#logos)).
+
+**Emergencies, anywhere**
+- An aircraft squawking 7700 (emergency), 7600 (radio failure) or 7500 is drawn in red with a pulsing ring.
+- RadarMASH also keeps watch on the whole world for a 7700. When there is one, a notice flashes with the callsign and
+  how far away it is. Press the button and the scope jumps there, map and all, and follows the aircraft; press again
+  to come home. It comes home by itself when the emergency is over.
+
+**More than one page**
+- **Weather**: conditions now, wind drawn as an arrow round the rim, three days ahead, sunrise and sunset.
+- **Airport board**: the arrivals and departures seen for the airport you name, or for the busiest one nearby.
+- **Overhead log**: "what was that?" The last few aircraft that passed right over you, with when, how high and where
+  they were going.
+- Press the button twice to step through the pages, once to come back to the scope. Or have them change on a timer.
+
+<p align="center"><img src="docs/img/pages.png" width="760" alt="The weather page, the airport board and the overhead log"></p>
+
+**It tells you when something interesting turns up**
+- A notice when a military aircraft comes into view, or any type on your own list (an A380, a Spitfire, whatever you
+  would look up for).
+- The range can follow the nearest aircraft by itself, closing in as it approaches.
+- The screen can dim at night, by the clock or from sunset to sunrise.
+
+**Control it from anywhere on your network**
+- One plain web address does anything the button and most of the settings page can: `http://radarmash.local/api/do?page=weather`.
+  Made for a Stream Deck key, a home-automation rule or a shell script. See [Remote control](#remote-control).
+- An optional key, so that only things you have given it to can change anything.
 
 **A map of where you are**
 - An underlay from standard web map tiles. OpenStreetMap works out of the box with no account or key.
@@ -71,6 +103,8 @@ Named for Radar O'Reilly, who always heard the choppers first.
 - Five fonts, from chunky pixels to the typeface Airbus designed for cockpits.
 - Every feature has its own switch.
 - Settings are stored on the radar and survive restarts and power cuts.
+- Map tiles and logos are kept on the radar too, so after a restart the picture is back at once and the map servers
+  are not asked again.
 
 **Careful with your device**
 - Starts **on trial**: until you choose to keep it, any restart or power cycle returns to the firmware you came from.
@@ -151,6 +185,8 @@ RadarMASH leans on free services run by enthusiasts. Please be gentle with them:
 |---|---|---|
 | Aircraft positions | [adsb.fi](https://adsb.fi), [adsb.lol](https://adsb.lol) | Refreshed every 5 seconds by default. If one stops answering, the other is used. |
 | Airline and route | [adsbdb](https://www.adsbdb.com), then [hexdb](https://hexdb.io) | Looked up once per flight and checked against the aircraft. |
+| Emergency watch | [adsb.fi](https://adsb.fi), [adsb.lol](https://adsb.lol) | Once a minute: is anyone, anywhere, squawking 7700? Can be switched off. |
+| Weather and time zone | [Open-Meteo](https://open-meteo.com) | One request every 15 minutes, with your position rounded to about a kilometre. Not asked at all if you set the time zone by hand, switch the weather page off and do not dim by the sun. |
 | Map | [OpenStreetMap](https://www.openstreetmap.org/copyright) by default | Its [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) applies. Map data © OpenStreetMap contributors, shown on screen. |
 
 ### Logos
@@ -194,18 +230,47 @@ and that must give exactly the same picture as drawing it whole.
     GET  /api/settings            everything, as one object
     POST /api/settings            any subset, e.g. {"trails": false, "range_km": 80}
     GET  /api/status              what the radar is doing
-    POST /api/press, /api/hold    the button
+    POST /api/press, /api/double, /api/hold    the button: one press, two, held
+    POST /api/alert-test          pretend there is an emergency for three minutes, to try the notice
+    GET  /api/do?name=value&...   remote control, below
 
 Values out of range are clamped and anything unrecognised is ignored, so an old page and new firmware get along.
 
 **Fonts** are bitmaps generated by `tools/make_fonts.py` (needs Pillow) into `core/fonts_data.cpp`, which is checked in.
 Only fonts that may be redistributed in converted form under their own name are suitable.
 
+## Remote control
+
+Anything on your network can drive the radar by opening an address. GET, POST and PUT all work, several things can go
+in one request, and the reply says what is showing:
+
+    http://radarmash.local/api/do?page=weather
+    http://radarmash.local/api/do?page=radar&range=40&map=on
+    {"ok":true,"page":"radar","range_km":40,"away":false}
+
+| Name | Values | What it does |
+|---|---|---|
+| `page` | `radar` `weather` `board` `log` `next` | Show a page |
+| `press` | `short` `double` `long` | The same as the button |
+| `range` | `10` `20` `40` `80` `160` `next` | Set the range |
+| `brightness` | `1` to `100` | Backlight |
+| `select` | a callsign | Highlight that aircraft |
+| `alert` | `look` `home` `test` | Go to the emergency on offer, come back, or try a pretend one |
+| any switch | `on` `off` `toggle` | `sweep` `rings` `labels` `altitude` `trails` `fade` `shapes` `auto_cycle` `tag` `card` `map` `declutter` `logos` `clock` `alerts` `visitors` `auto_range` `type_names` and the rest: the names are the ones in `/api/settings` |
+| a few numbers | | `map_style` `map_brightness` `max_aircraft` `sweep_seconds` `refresh_s` `night` `night_brightness` `units` `page_cycle_s` `overhead_km` |
+
+It deliberately cannot change where the radar is, where its data comes from, or the key: those stay on the settings page.
+
+**The control key.** Out of the box anyone on your network can change settings, as with most home gadgets. Set a key on
+the settings page and every change then needs it, as `&key=...` on the address or an `X-Key` header; looking at the
+status stays open. It is a simple lock for a home network: it travels unencrypted, like everything else the radar
+serves, so do not reuse a password that matters. Forgotten it? Press the radar's button five times quickly.
+
 ## Known limits
 
 - Proven on one radar. A second owner's experience would be valuable.
-- Map tiles and logos are kept in memory, so they are fetched again after a restart.
-- Logos appear in the tag box, not on the large detail card.
+- The emergency watch covers 7700 only, and only what the community feeds can see: no coverage, no alert.
+- The airport board and the overhead log only know what the radar has seen since it was switched on, within its range.
 - Route checking catches routes that do not fit the aircraft; a wrong route that happens to look plausible still gets through.
 
 ## Licence and credits
