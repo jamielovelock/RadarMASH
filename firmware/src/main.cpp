@@ -474,6 +474,12 @@ static int cache_files = 0, cache_hits = 0, cache_writes = 0, cache_evictions = 
 static const uint32_t CACHE_MAX_BYTES = 1536UL * 1024UL, CACHE_KEEP_FREE = 512UL * 1024UL;
 static const time_t CACHE_STALE_S = 30L * 24L * 3600L;      // older than this: fetch a fresh copy when the network allows
 
+// How much of the filesystem is free. Working it out walks the whole filesystem, which takes a third of a second or
+// more, so it is done only here, on the feed task, when our files change: never from the loop that draws the screen.
+// (The status page used to ask each time, and every request froze the sweep.)
+static uint32_t fs_free_bytes = 0;
+static uint32_t fsFree() { return fs_free_bytes = LittleFS.totalBytes() - LittleFS.usedBytes(); }
+
 static uint32_t hashText(const String &s) { uint32_t h = 2166136261u; for (size_t i = 0; i < s.length(); i++) h = (h ^ (uint8_t)s[i]) * 16777619u; return h; }
 
 static void cacheSetup() {
@@ -483,6 +489,7 @@ static void cacheSetup() {
   File dir = LittleFS.open("/rm");
   if (!dir || !dir.isDirectory()) { fs_ok = false; return; }
   for (File f = dir.openNextFile(); f; f = dir.openNextFile()) { cache_bytes += f.size(); cache_files++; }
+  fsFree();
 }
 
 // Reads a kept file into PSRAM. `stale` says it is old enough to be worth replacing.
@@ -506,7 +513,7 @@ static void cacheRemove(const char *path) {
   if (!f) return;
   uint32_t size = f.size();
   f.close();
-  if (LittleFS.remove(path)) { cache_bytes -= size > cache_bytes ? cache_bytes : size; if (cache_files) cache_files--; }
+  if (LittleFS.remove(path)) { cache_bytes -= size > cache_bytes ? cache_bytes : size; if (cache_files) cache_files--; fs_free_bytes += size; }   // near enough until the next count
 }
 
 static bool cacheEvictOldest() {
@@ -527,16 +534,16 @@ static void cacheWrite(const char *path, const uint8_t *data, int len) {
   if (!fs_ok || len <= 0 || (uint32_t)len > CACHE_MAX_BYTES / 4) return;
   cacheRemove(path);                                 // replacing a stale copy
   for (int guard = 0; guard < 64; guard++) {         // make room within our allowance, leaving the rest of the filesystem alone
-    uint32_t free_bytes = LittleFS.totalBytes() - LittleFS.usedBytes();
+    uint32_t free_bytes = fsFree();
     if (cache_bytes + (uint32_t)len <= CACHE_MAX_BYTES && free_bytes >= CACHE_KEEP_FREE + (uint32_t)len) break;
     if (!cacheEvictOldest()) return;
   }
-  if (cache_bytes + (uint32_t)len > CACHE_MAX_BYTES || LittleFS.totalBytes() - LittleFS.usedBytes() < CACHE_KEEP_FREE + (uint32_t)len) return;
+  if (cache_bytes + (uint32_t)len > CACHE_MAX_BYTES || fs_free_bytes < CACHE_KEEP_FREE + (uint32_t)len) return;
   File f = LittleFS.open(path, "w");
   if (!f) return;
   bool ok = (int)f.write(data, len) == len;
   f.close();
-  if (ok) { cache_bytes += len; cache_files++; cache_writes++; }
+  if (ok) { cache_bytes += len; cache_files++; cache_writes++; fs_free_bytes -= (uint32_t)len > fs_free_bytes ? fs_free_bytes : (uint32_t)len; }
   else LittleFS.remove(path);
 }
 
@@ -1111,7 +1118,7 @@ static void hStatus() {
   j += ",\"time_set\":" + String(time(nullptr) > 1700000000 ? "true" : "false") + ",\"verify_certs\":" + String(verify_certs ? "true" : "false");
   j += ",\"logos\":" + String(logos_loaded) + ",\"logos_missing\":" + String(logos_missing);
   j += ",\"fs\":" + String(fs_ok ? "true" : "false") + ",\"cache_files\":" + String(cache_files) + ",\"cache_kb\":" + String(cache_bytes / 1024) + ",\"cache_hits\":" + String(cache_hits);
-  j += ",\"cache_writes\":" + String(cache_writes) + ",\"cache_evictions\":" + String(cache_evictions) + ",\"fs_free_kb\":" + String(fs_ok ? (unsigned)((LittleFS.totalBytes() - LittleFS.usedBytes()) / 1024) : 0);
+  j += ",\"cache_writes\":" + String(cache_writes) + ",\"cache_evictions\":" + String(cache_evictions) + ",\"fs_free_kb\":" + String(fs_ok ? (unsigned)(fs_free_bytes / 1024) : 0);
   j += ",\"emergency\":\"" + String(watch.have ? watch.target.callsign : "") + "\",\"away\":" + String(watch.away ? "true" : "false") + ",\"watch_polls\":" + String(watch_polls) + ",\"why_home\":\"" + String(watch.why_home) + "\"";
   j += ",\"page\":\"" + String(pageName((Page)radar.page)) + "\",\"night\":" + String(night_now ? "true" : "false") + ",\"weather\":" + String(pages.wx.have ? "true" : "false") +
        ",\"weather_fetches\":" + String(weather_fetches) + ",\"sightings\":" + String(pages.seen.n) + ",\"key_set\":" + String(api_key_now[0] ? "true" : "false");
