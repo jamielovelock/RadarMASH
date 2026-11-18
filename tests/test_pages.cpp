@@ -111,7 +111,7 @@ TEST(sightings_keep_the_closest_pass_and_make_room) {
   r.ac[1].on_ground = true; r.count = 2;
   // a crowd arrives: the list stays its size and the stalest entries go
   for (int i = 0; i < 40; i++) {
-    char hex[7]; snprintf(hex, sizeof hex, "b%05d", i);
+    char hex[16]; snprintf(hex, sizeof hex, "b%05d", i);   // (room for any int; plane() keeps the first six)
     r.count = 1; r.ac[0] = plane(hex, "CROWD", 51.1, -1.0);
     s.note(r, 1800000200 + i, 200000 + i * 1000);
   }
