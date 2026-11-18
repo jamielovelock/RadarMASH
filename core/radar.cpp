@@ -636,7 +636,7 @@ void Radar::draw(Canvas &c) const {
     if (i != selected && project(ac[i], x, y)) drawAircraft(c, *this, ac[i], x, y, false, tag, nullptr);
   c.disc(CENTRE, CENTRE, 2.5f, COL_SWEEP);
   if (set.clock && clock_min >= 0) {
-    char hm[8];
+    char hm[32];                                                     // room for any int, however odd the clock
     snprintf(hm, sizeof hm, "%02d:%02d%s", clock_min / 60 % 24, clock_min % 60, clock_utc ? "Z" : "");
     const int w = Canvas::textWidth(hm, 2);
     c.blendRect(180 - w / 2 - 4, CLOCK_Y, w + 8, lineHeight(2) + 4, COL_CARD, 200);   // a backing, so the axis does not run through the digits

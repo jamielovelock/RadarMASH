@@ -106,7 +106,7 @@ struct Radar {
   char map_credit[28] = "";                     // attribution the map source asks for, shown at the bottom
   int16_t clock_min = -1;                       // minutes since midnight to show as the time, or -1 if not known; set by the caller
   bool clock_utc = false;                       // the time is UTC, not local: shown with a Z
-  char alert[24] = "", alert2[30] = "";         // two lines of flashing notice at the top; empty for none (see alert.h)
+  char alert[24] = "", alert2[40] = "";         // two lines of flashing notice at the top; empty for none (see alert.h)
   char pin_hex[7] = "";                         // when set, the highlight stays on this aircraft instead of cycling
   float sweep_deg = 0;        // current sweep bearing
   uint32_t now_ms = 0, last_cycle_ms = 0;
