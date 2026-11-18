@@ -13,7 +13,8 @@ Config::Config() {
   snprintf(feed_url, sizeof feed_url, "%s", FEED_ADSB_FI);
   snprintf(map_url, sizeof map_url, "%s", MAP_OSM);
   snprintf(map_credit, sizeof map_credit, "%s", "(c) OpenStreetMap");
-  logo_url[0] = 0;
+  logo_url[0] = 0; board_airport[0] = 0; api_key[0] = 0;
+  snprintf(visitor_types, sizeof visitor_types, "%s", VISITOR_TYPES);
 }
 
 // ---- writing ----
@@ -37,7 +38,7 @@ struct Out {
   }
 };
 
-size_t configToJson(const Config &c, char *out, size_t n) {
+size_t configToJson(const Config &c, char *out, size_t n, bool for_saving) {
   if (!out || n < 2) return 0;
   Out o{out, n};
   o.add("{\"v\":1,");
@@ -53,6 +54,11 @@ size_t configToJson(const Config &c, char *out, size_t n) {
   o.str("map_url", c.map_url);
   o.str("map_credit", c.map_credit);
   o.str("logo_url", c.logo_url);
+  o.add("\"night\":%d,\"night_brightness\":%d,\"night_start_min\":%d,\"night_end_min\":%d,", (int)c.night, (int)c.night_brightness, (int)c.night_start_min, (int)c.night_end_min);
+  o.add("\"units\":%d,\"page_cycle_s\":%d,\"overhead_km\":%.1f,", (int)c.units, (int)c.page_cycle_s, (double)c.overhead_km);
+  o.str("board_airport", c.board_airport);
+  o.str("visitor_types", c.visitor_types);
+  if (for_saving) o.str("api_key", c.api_key); else o.add("\"api_key_set\":%s,", c.api_key[0] ? "true" : "false");
   if (!o.ok || o.used + 1 >= n) { out[0] = 0; return 0; }
   out[o.used - 1] = '}';                                // replace the last comma
   out[o.used] = 0;
@@ -125,6 +131,40 @@ bool configFromJson(const char *text, size_t len, Config &c) {
     char buf[8];
     if (json::string(v, buf, sizeof buf) && !buf[0]) c.logo_url[0] = 0;          // an empty string turns logos off
     else getUrl(root, "logo_url", c.logo_url, sizeof c.logo_url);
+  }
+  if (getNum(root, "night", 0, 2, d)) c.night = (uint8_t)d;
+  if (getNum(root, "night_brightness", 1, 100, d)) c.night_brightness = (uint8_t)d;
+  if (getNum(root, "night_start_min", 0, 1439, d)) c.night_start_min = (int16_t)d;
+  if (getNum(root, "night_end_min", 0, 1439, d)) c.night_end_min = (int16_t)d;
+  if (getNum(root, "units", 0, (int)Units::Count - 1, d)) c.units = (Units)(int)d;
+  if (getNum(root, "page_cycle_s", 0, 3600, d)) c.page_cycle_s = (uint16_t)(d > 0 && d < 5 ? 5 : d);   // faster than that is a strobe
+  if (getNum(root, "overhead_km", 0.5, 50, d)) c.overhead_km = (float)d;
+  // Short codes: letters and digits, made capitals; anything else in them and the whole value is ignored.
+  auto codes = [&](const char *key, char *out, size_t n, bool commas) {
+    char buf[128];
+    if (!json::member(root, key, v) || !json::string(v, buf, sizeof buf)) return;
+    char clean[128];
+    size_t k = 0;
+    for (const char *s = buf; *s; s++) {
+      char ch = *s;
+      if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 32);
+      if (ch == ' ') continue;
+      if (!((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || (commas && ch == ','))) return;
+      clean[k++] = ch;
+    }
+    clean[k] = 0;
+    if (k < n) memcpy(out, clean, k + 1);
+  };
+  codes("board_airport", c.board_airport, sizeof c.board_airport, false);
+  codes("visitor_types", c.visitor_types, sizeof c.visitor_types, true);
+  if (json::member(root, "api_key", v)) {             // plain characters that are safe in a web address; empty removes it
+    char buf[64];
+    if (json::string(v, buf, sizeof buf) && strlen(buf) < sizeof c.api_key) {
+      bool good = true;
+      for (const char *s = buf; *s; s++)
+        if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || (*s >= '0' && *s <= '9') || *s == '-' || *s == '_' || *s == '.')) good = false;
+      if (good) memcpy(c.api_key, buf, strlen(buf) + 1);
+    }
   }
   if (json::member(root, "map_credit", v)) {
     char buf[sizeof c.map_credit];

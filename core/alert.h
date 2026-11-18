@@ -30,6 +30,7 @@ struct Watch {
   uint32_t away_since = 0;
   double back_lat = 0, back_lon = 0;  // where home is, for coming back
   float back_range = 40;
+  const char *why_home = "";         // what ended the last visit (shown in the status, for finding faults)
 
   // The world reply, already parsed (nearest home first is best; the first airborne one is used). n = 0 means all clear.
   void found(const Aircraft *list, int n);
@@ -38,7 +39,7 @@ struct Watch {
   // Once a frame or so: follows the aircraft while away, comes home after ten minutes or when it is all over, and
   // keeps the notice at the top of the scope up to date. `enabled` is the user's setting.
   void tick(Radar &r, uint32_t now_ms, bool enabled);
-  void comeHome(Radar &r);
+  void comeHome(Radar &r, const char *why = "settings");
 
   bool alerting() const;              // is there something new to offer?
 };

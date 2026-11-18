@@ -77,7 +77,7 @@ void Live::poll() {
     char num[32];
     snprintf(num, sizeof num, "%.4f", lat); replaceAll(url, "{lat}", num);
     snprintf(num, sizeof num, "%.4f", lon); replaceAll(url, "{lon}", num);
-    replaceAll(url, "{nm}", std::to_string(feedRadiusNm(radar_->range_km)));
+    replaceAll(url, "{nm}", std::to_string(feedRadiusNm(radar_->feedRangeKm())));
   }
   std::string body;
   bool got = httpGet(url, ua, body, verify);
@@ -103,6 +103,7 @@ void Live::poll() {
     snprintf(fresh[i].dest, sizeof fresh[i].dest, "%s", hit->second.info.dest);
   }
   radar_->update(fresh.data(), n, clock_());
+  if (after_update) after_update();
   last_count = n; last_ok = (long)time(nullptr); last_error.clear(); failing = 0;
 }
 
@@ -126,24 +127,25 @@ void Live::watchWorld() {
   if ((long)time(nullptr) >= watch_test_until) watch->found(list.data(), n);
 }
 
-// The time zone where the radar is, asked for when the position changes and hourly after that (summer time moves it).
+// The weather where the radar is, and with it the time zone: asked for when the position changes and every quarter of
+// an hour after that.
 void Live::lookupZone() {
   std::string ua; bool verify, want; double lat, lon;
   long now = (long)time(nullptr);
   { std::lock_guard<std::mutex> lock(*mu_); want = zone_wanted; lat = zone_lat; lon = zone_lon; ua = user_agent; verify = verify_certs;
-    if (!want) zone_known = false; }
+    if (!want) { zone_known = false; wx = Weather(); } }
   bool moved = lat != zone_for_lat_ || lon != zone_for_lon_;
-  if (!want || (!moved && now - zone_at_ < 3600)) return;
+  if (!want || (!moved && now - zone_at_ < WEATHER_EVERY_S)) return;
   zone_at_ = now; zone_for_lat_ = lat; zone_for_lon_ = lon;
-  std::string url = ZONE_OPEN_METEO, body;
+  std::string url = WEATHER_OPEN_METEO, body;
   char num[32];
   snprintf(num, sizeof num, "%.2f", lat); replaceAll(url, "{lat}", num);
   snprintf(num, sizeof num, "%.2f", lon); replaceAll(url, "{lon}", num);
-  int minutes;
-  bool ok = httpGet(url, ua, body, verify) && parseUtcOffset(body.data(), body.size(), minutes);
+  Weather fresh;
+  bool ok = httpGet(url, ua, body, verify) && parseWeather(body.data(), body.size(), fresh);
   std::lock_guard<std::mutex> lock(*mu_);
-  if (ok) { zone_known = true; zone_min = minutes; }
-  else { if (moved) zone_known = false; zone_at_ = now - 3300; }   // try again in five minutes
+  if (ok) { wx = fresh; zone_known = true; zone_min = fresh.utc_offset_min; }
+  else { if (moved) { zone_known = false; wx = Weather(); } zone_at_ = now - WEATHER_EVERY_S + 300; }   // try again in five minutes
 }
 
 bool Live::airport(const std::string &icao, const std::string &ua, bool verify, Airport &out) {

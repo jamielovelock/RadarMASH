@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "radar.h"
 #include "alert.h"
+#include "pages.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -36,6 +37,9 @@ const Toggle TOGGLES[] = {
   {"tag_level", "Tag: level", &Settings::tag_level}, {"tag_speed", "Tag: speed", &Settings::tag_speed},
   {"card", "Large card", &Settings::card}, {"map", "Map", &Settings::map}, {"declutter", "Avoid overlapping labels", &Settings::declutter},
   {"logos", "Airline logos", &Settings::logos}, {"clock", "Clock", &Settings::clock}, {"alerts", "Emergency alerts", &Settings::alerts},
+  {"visitors", "Unusual visitor notice", &Settings::visitors}, {"visitor_heli", "Notice helicopters too", &Settings::visitor_heli},
+  {"auto_range", "Range follows nearest", &Settings::auto_range}, {"page_weather", "Weather page", &Settings::page_weather},
+  {"page_board", "Airport board page", &Settings::page_board}, {"page_log", "Overhead log page", &Settings::page_log},
 };
 const int TOGGLE_COUNT = (int)(sizeof TOGGLES / sizeof TOGGLES[0]);
 
@@ -89,6 +93,32 @@ void Radar::update(Aircraft *fresh, int n, uint32_t t) {
   selected = -1;
   for (int i = 0; i < n && sel_hex[0]; i++)
     if (strcmp(ac[i].hex, sel_hex) == 0) { selected = i; break; }
+
+  // The range follows the nearest aircraft: out when it is beyond the edge, in when it would sit well inside the next
+  // range down. Not more often than every fifteen seconds, so the map is not for ever being redrawn.
+  if (set.auto_range && !pin_hex[0] && n > 0 && (!range_auto_ms_ || t - range_auto_ms_ > 15000)) {
+    double nearest = 1e12;
+    for (int i = 0; i < n; i++) {
+      if (ac[i].on_ground) continue;
+      double e = (ac[i].lon - home_lon) * kx, nn = (ac[i].lat - home_lat) * 110.57, d = sqrt(e * e + nn * nn);
+      if (d < nearest) nearest = d;
+    }
+    float want = range_km;
+    if (nearest < 1e11) {
+      const int steps = (int)(sizeof RANGES_KM / sizeof RANGES_KM[0]);
+      if (nearest > range_km * 0.95f || range_km > AUTO_RANGE_MAX_KM) {
+        want = AUTO_RANGE_MAX_KM;
+        for (int i = steps - 1; i >= 0; i--) if (RANGES_KM[i] <= AUTO_RANGE_MAX_KM && nearest <= RANGES_KM[i] * 0.85f) want = RANGES_KM[i];
+      } else {
+        for (int i = steps - 1; i >= 0; i--) if (RANGES_KM[i] < range_km && nearest <= RANGES_KM[i] * 0.7f) want = RANGES_KM[i];
+      }
+    }
+    if (want != range_km) { range_km = want; range_auto_ms_ = t | 1; }
+  }
+}
+
+float Radar::feedRangeKm() const {
+  return set.auto_range && !pin_hex[0] && range_km < AUTO_RANGE_MAX_KM ? AUTO_RANGE_MAX_KM : range_km;
 }
 
 void Radar::tick(uint32_t t) {
@@ -613,8 +643,34 @@ static void drawCard(Canvas &c, const Aircraft &a, bool at_top, const Logo *logo
   c.textCentred(180, y + medium + large + medium, line, 2, COL_LABEL);
 }
 
+static void drawClock(Canvas &c, const Radar &r) {
+  if (!r.set.clock || r.clock_min < 0) return;
+  char hm[32];                                                       // room for any int, however odd the clock
+  snprintf(hm, sizeof hm, "%02d:%02d%s", r.clock_min / 60 % 24, r.clock_min % 60, r.clock_utc ? "Z" : "");
+  const int w = Canvas::textWidth(hm, 2);
+  c.blendRect(180 - w / 2 - 4, CLOCK_Y, w + 8, lineHeight(2) + 4, COL_CARD, 200);   // a backing, so the axis does not run through the digits
+  c.textCentred(180, CLOCK_Y + 2, hm, 2, COL_SWEEP);
+}
+
+// The notice at the top, on top of everything: an emergency flashes red, a visitor is steady amber.
+static void drawNotice(Canvas &c, const Radar &r) {
+  if (!r.alert[0]) return;
+  const bool visitor = r.alert_style == 1, lit = visitor || r.now_ms % 1000 < 500;
+  const Color fill = visitor ? rgb(70, 45, 0) : lit ? rgb(150, 0, 0) : rgb(60, 0, 0), edge = visitor ? COL_BLIP : COL_EMERG;
+  c.blendRect(ALERT_X0, ALERT_Y, SCREEN_W - 2 * ALERT_X0, ALERT_H, fill, 235);
+  c.blendRect(ALERT_X0, ALERT_Y, SCREEN_W - 2 * ALERT_X0, 1, edge, 255); c.blendRect(ALERT_X0, ALERT_Y + ALERT_H - 1, SCREEN_W - 2 * ALERT_X0, 1, edge, 255);
+  c.textCentred(180, ALERT_Y + 4, r.alert, 2, rgb(255, 255, 255));
+  c.textCentred(180, ALERT_Y + 6 + lineHeight(2), r.alert2, 1, visitor ? rgb(255, 225, 170) : rgb(255, 200, 190));
+}
+
 void Radar::draw(Canvas &c) const {
   setFont(set.font);
+  if (page != 0 && pages) {                                          // one of the other pages: see pages.cpp
+    drawPage(c, *this, *pages);
+    drawClock(c, *this);
+    drawNotice(c, *this);
+    return;
+  }
   const MapImage *underlay = set.map && map && map->ready ? map : nullptr;
   if (cache && cache->valid && cache->key == scopeKey(*this, underlay)) drawScopeCached(c, *cache, set.sweep, sweep_deg);
   else drawScope(c, set, sweep_deg, underlay);
@@ -635,24 +691,12 @@ void Radar::draw(Canvas &c) const {
   for (int i = 0; i < count; i++)
     if (i != selected && project(ac[i], x, y)) drawAircraft(c, *this, ac[i], x, y, false, tag, nullptr);
   c.disc(CENTRE, CENTRE, 2.5f, COL_SWEEP);
-  if (set.clock && clock_min >= 0) {
-    char hm[32];                                                     // room for any int, however odd the clock
-    snprintf(hm, sizeof hm, "%02d:%02d%s", clock_min / 60 % 24, clock_min % 60, clock_utc ? "Z" : "");
-    const int w = Canvas::textWidth(hm, 2);
-    c.blendRect(180 - w / 2 - 4, CLOCK_Y, w + 8, lineHeight(2) + 4, COL_CARD, 200);   // a backing, so the axis does not run through the digits
-    c.textCentred(180, CLOCK_Y + 2, hm, 2, COL_SWEEP);
-  }
+  drawClock(c, *this);
   if (selected >= 0 && selected < count && project(ac[selected], x, y)) {
     if (set.card) drawCard(c, ac[selected], y > CENTRE, tag_logo_);
     drawAircraft(c, *this, ac[selected], x, y, true, tag, tag_logo_);
   }
-  if (alert[0]) {                                                    // on top of everything, and flashing
-    const bool lit = now_ms % 1000 < 500;
-    c.blendRect(ALERT_X0, ALERT_Y, SCREEN_W - 2 * ALERT_X0, ALERT_H, lit ? rgb(150, 0, 0) : rgb(60, 0, 0), 235);
-    c.blendRect(ALERT_X0, ALERT_Y, SCREEN_W - 2 * ALERT_X0, 1, COL_EMERG, 255); c.blendRect(ALERT_X0, ALERT_Y + ALERT_H - 1, SCREEN_W - 2 * ALERT_X0, 1, COL_EMERG, 255);
-    c.textCentred(180, ALERT_Y + 4, alert, 2, rgb(255, 255, 255));
-    c.textCentred(180, ALERT_Y + 6 + lineHeight(2), alert2, 1, rgb(255, 200, 190));
-  }
+  drawNotice(c, *this);
 }
 
 // ---- demo traffic (all names made up) ----

@@ -38,16 +38,16 @@ void Watch::found(const Aircraft *list, int n) {
 
 bool Watch::alerting() const { return have && !away && strcmp(target.hex, dismissed) != 0; }
 
-void Watch::comeHome(Radar &r) {
+void Watch::comeHome(Radar &r, const char *why) {
   if (!away) return;
-  away = false;
+  away = false; why_home = why;
   r.home_lat = back_lat; r.home_lon = back_lon; r.range_km = back_range;
   r.pin_hex[0] = 0;
   r.count = 0; r.selected = -1;                                      // a different sky
 }
 
 bool Watch::press(Radar &r, uint32_t now) {
-  if (away) { memcpy(dismissed, target.hex, sizeof dismissed); comeHome(r); return true; }
+  if (away) { memcpy(dismissed, target.hex, sizeof dismissed); comeHome(r, "press"); return true; }
   if (!alerting()) return false;
   back_lat = r.home_lat; back_lon = r.home_lon; back_range = r.range_km;
   away = true; away_since = now;
@@ -61,9 +61,10 @@ bool Watch::press(Radar &r, uint32_t now) {
 
 void Watch::tick(Radar &r, uint32_t now, bool enabled) {
   if (away) {
-    if (!enabled || !have || now - away_since > AWAY_MAX_MS) {       // over, switched off, or forgotten about
+    // (signed: a frame whose clock was read just before the press must not look like 49 days later)
+    if (!enabled || !have || (int32_t)(now - away_since) > (int32_t)AWAY_MAX_MS) {
       memcpy(dismissed, target.hex, sizeof dismissed);
-      comeHome(r);
+      comeHome(r, !enabled ? "switched off" : !have ? "all clear" : "ten minutes");
     } else {
       // keep it on the scope: when it nears the edge, centre on it again
       for (int i = 0; i < r.count; i++) {
@@ -73,7 +74,7 @@ void Watch::tick(Radar &r, uint32_t now, bool enabled) {
       }
     }
   }
-  r.alert[0] = r.alert2[0] = 0;
+  r.alert[0] = r.alert2[0] = 0; r.alert_style = 0;
   if (!enabled || !have) return;
   if (away) {
     snprintf(r.alert, sizeof r.alert, "%.4s %.8s", target.squawk[0] ? target.squawk : "7700", target.callsign);

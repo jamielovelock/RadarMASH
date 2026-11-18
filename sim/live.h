@@ -5,6 +5,7 @@
 #pragma once
 #include "../core/alert.h"
 #include "../core/feed.h"
+#include "../core/pages.h"
 #include <map>
 #include <mutex>
 #include <string>
@@ -22,7 +23,9 @@ struct Live {
   bool alerts = false;          // keep the worldwide emergency watch (only while enabled)
   rm::Watch *watch = nullptr;   // where its findings go
   long watch_test_until = 0;    // a pretend emergency is being shown until this time: leave it alone
-  bool zone_wanted = false;     // look up the time zone for zone_lat, zone_lon
+  bool zone_wanted = false;     // look up the weather and the time zone for zone_lat, zone_lon
+  rm::Weather wx;               // result: the weather there (wx.have false until known)
+  void (*after_update)() = nullptr; // called with the lock held, after each fresh list of aircraft has gone in
   double zone_lat = 0, zone_lon = 0;
   bool zone_known = false;      // result: zone_min is minutes ahead of UTC there, now
   int zone_min = 0;

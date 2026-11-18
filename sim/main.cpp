@@ -10,6 +10,8 @@
 // saved settings and stay offline unless --map, so they always come out the same.
 #include "../core/alert.h"
 #include "../core/config.h"
+#include "../core/control.h"
+#include "../core/pages.h"
 #include "../core/radar.h"
 #include "admin_html.h"
 #include "wifi_html.h"
@@ -40,6 +42,8 @@ static std::mutex radar_mu;                // the live-data thread and the web r
 static Config cfg;                         // what the settings page shows and what is saved
 static Live live;
 static Watch watch;                        // the worldwide emergency watch
+static PageData pages;                     // what the weather, board and log pages draw from
+static Visitors visitors;                  // notices for unusual aircraft
 static int shot_clock = -1;                // still frames: the time to show, or none
 static SimLogos logos;                     // airline logos, if the settings name a source
 static ScopeCache scope_cache;             // the same speed-up the device uses, so the simulator shows the same picture
@@ -89,10 +93,15 @@ static void applyConfig() {
   live.feed_url = cfg.feed_url; live.refresh_s = cfg.refresh_s; live.include_ground = cfg.include_ground;
   live.enabled = cfg.wantsLive();
   live.alerts = cfg.set.alerts; live.watch = &watch;
-  live.zone_wanted = cfg.utc_auto && cfg.home_set; live.zone_lat = cfg.home_lat; live.zone_lon = cfg.home_lon;
+  // The weather service is only asked when something needs it: the clock's zone, the weather page or dimming by the sun.
+  live.zone_wanted = cfg.home_set && (cfg.utc_auto || cfg.set.page_weather || cfg.night == 1); live.zone_lat = cfg.home_lat; live.zone_lon = cfg.home_lon;
   tiles.url_template = cfg.map_url;
   tiles.verify_certs = live.verify_certs = logos.verify_certs = cfg.verify_certs;
   logos.url_template = cfg.logo_url;
+  pages.units = cfg.units; pages.overhead_km = cfg.overhead_km;
+  snprintf(pages.airport, sizeof pages.airport, "%s", cfg.board_airport);
+  radar.pages = &pages;
+  pages.wx_wanted = live.zone_wanted;
   radar.logos = &logos;
   if (was_live != live.enabled || moved) { radar.count = 0; radar.selected = -1; live.last_count = -1; live.last_ok = 0; }   // a different sky
 }
@@ -100,7 +109,7 @@ static void applyConfig() {
 static void saveConfig() {
   if (!save_settings) return;
   char buf[CONFIG_JSON_MAX];
-  size_t n = configToJson(cfg, buf, sizeof buf);
+  size_t n = configToJson(cfg, buf, sizeof buf, true);
   if (!n) return;
   std::string path = settingsPath(), dir = path.substr(0, path.rfind('/'));
   mkdir(dir.substr(0, dir.rfind('/')).c_str(), 0700); mkdir(dir.c_str(), 0700);
@@ -117,9 +126,26 @@ static void loadConfig() {
   configFromJson(buf, n, cfg);
 }
 
+// What happens each time the list of aircraft is refreshed: the log of what has been seen, and the visitor notice.
+static void afterUpdate() {
+  if (watch.away) return;
+  pages.seen.note(radar, (long long)time(nullptr), nowMs());
+  if (radar.set.visitors) visitors.check(radar, cfg.visitor_types, radar.set.visitor_heli, nowMs());
+}
+
 static void render(uint32_t t) {
-  if (!live.enabled) demoTraffic(radar, t);
+  if (!live.enabled) {
+    demoTraffic(radar, t);
+    static uint32_t noted = 0;
+    if (save_settings && t - noted > 2000) { noted = t; afterUpdate(); }
+  }
   watch.tick(radar, t, radar.set.alerts && (live.enabled || !save_settings));
+  visitors.tick(radar, t, radar.set.visitors);
+  if (save_settings) {
+    pages.wx = live.wx;
+    pages.utc_offset_min = cfg.utc_auto ? (live.zone_known ? live.zone_min : 0) : cfg.utc_offset_min;
+    pageTick(radar, watch, cfg.page_cycle_s, t);
+  }
   if (save_settings) {                     // serving: the real time. Automatic zone not known yet: UTC, marked Z
     bool zoned = !cfg.utc_auto || live.zone_known;
     radar.clock_min = (int16_t)clockMinutes((long long)time(nullptr), cfg.utc_auto ? (live.zone_known ? live.zone_min : 0) : cfg.utc_offset_min);
@@ -190,22 +216,24 @@ static std::string settingsJson() {
   cfg.set = radar.set;
   if (!watch.away) cfg.range_km = radar.range_km;       // the button can change the range behind the page's back
   char buf[CONFIG_JSON_MAX];
-  return std::string(buf, configToJson(cfg, buf, sizeof buf));
+  return std::string(buf, configToJson(cfg, buf, sizeof buf));          // the form for a web page: no control key in it
 }
 
 static std::string statusJson() {
-  char j[600];
+  char j[800];
   long age = live.last_ok ? (long)time(nullptr) - live.last_ok : -1;
   snprintf(j, sizeof j, "{\"device\":false,\"version\":\"simulator\",\"live\":%s,\"aircraft\":%d,\"feed_age_s\":%ld,\"feed_error\":\"%s\",\"map_missing\":%d,\"range_km\":%d,"
-           "\"lookups\":%d,\"second_opinions\":%d,\"routes_rejected\":%d,\"logos\":%d,\"logos_missing\":%d,\"emergency\":\"%s\",\"away\":%s,\"zone_min\":%d}",
+           "\"lookups\":%d,\"second_opinions\":%d,\"routes_rejected\":%d,\"logos\":%d,\"logos_missing\":%d,\"emergency\":\"%s\",\"away\":%s,\"zone_min\":%d,\"page\":\"%s\",\"night\":%s,\"weather\":%s,\"key_set\":%s}",
            live.enabled ? "true" : "false", radar.count, age, jsonEscape(live.last_error).c_str(), radar.map ? map_image.missing : 0, (int)radar.range_km,
            live.lookups, live.second_opinions, live.routes_rejected, logos.fetched, logos.missing,
-           watch.have ? jsonEscape(watch.target.callsign).c_str() : "", watch.away ? "true" : "false", live.zone_known ? live.zone_min : -9999);
+           watch.have ? jsonEscape(watch.target.callsign).c_str() : "", watch.away ? "true" : "false", live.zone_known ? live.zone_min : -9999,
+           pageName((Page)radar.page), isNight(cfg.night, radar.clock_min, pages.wx, cfg.night_start_min, cfg.night_end_min) ? "true" : "false",
+           pages.wx.have ? "true" : "false", cfg.api_key[0] ? "true" : "false");
   return j;
 }
 
 // Read one request: the header, then as much body as Content-Length says (settings are small).
-static bool readRequest(int fd, std::string &method, std::string &path, std::string &body) {
+static bool readRequest(int fd, std::string &method, std::string &path, std::string &body, std::string &key) {
   std::string req;
   char buf[4096];
   size_t header_end = std::string::npos, want = 0;
@@ -227,8 +255,76 @@ static bool readRequest(int fd, std::string &method, std::string &path, std::str
   size_t sp1 = req.find(' '), sp2 = req.find(' ', sp1 + 1);
   if (sp1 == std::string::npos || sp2 == std::string::npos) return false;
   method = req.substr(0, sp1); path = req.substr(sp1 + 1, sp2 - sp1 - 1);
+  {                                        // the X-Key header, whatever its capitals
+    std::string head = req.substr(0, header_end), low = head;
+    for (char &ch : low) ch = (char)tolower((unsigned char)ch);
+    size_t k = low.find("\r\nx-key:");
+    if (k != std::string::npos) {
+      size_t a = k + 8, b = head.find("\r\n", a);
+      key = head.substr(a, b == std::string::npos ? std::string::npos : b - a);
+      while (!key.empty() && key[0] == ' ') key.erase(0, 1);
+    }
+  }
   body = req.substr(header_end + 4, want);
   return true;
+}
+
+static std::string urlDecode(const std::string &in) {
+  std::string out;
+  for (size_t i = 0; i < in.size(); i++) {
+    if (in[i] == '+') out += ' ';
+    else if (in[i] == '%' && i + 2 < in.size() + 0 && isxdigit((unsigned char)in[i + 1]) && isxdigit((unsigned char)in[i + 2])) {
+      out += (char)strtol(in.substr(i + 1, 2).c_str(), nullptr, 16); i += 2;
+    } else out += in[i];
+  }
+  return out;
+}
+static std::vector<std::pair<std::string, std::string>> queryPairs(const std::string &query) {
+  std::vector<std::pair<std::string, std::string>> out;
+  for (size_t a = 0; a < query.size();) {
+    size_t b = query.find('&', a);
+    if (b == std::string::npos) b = query.size();
+    std::string part = query.substr(a, b - a);
+    size_t eq = part.find('=');
+    if (!part.empty()) out.push_back({urlDecode(part.substr(0, eq)), eq == std::string::npos ? "" : urlDecode(part.substr(eq + 1))});
+    a = b + 1;
+  }
+  return out;
+}
+
+static void startAlertTest() {
+  Aircraft a;
+  snprintf(a.hex, sizeof a.hex, "test01"); snprintf(a.callsign, sizeof a.callsign, "TEST7700"); snprintf(a.squawk, sizeof a.squawk, "7700");
+  a.lat = 40.64; a.lon = -73.78; a.alt_ft = 12000; a.speed_kt = 250; a.track_deg = 40; a.shape = Shape::Narrow;
+  watch.comeHome(radar, "test"); watch = Watch(); watch.found(&a, 1); live.watch_test_until = (long)time(nullptr) + 180;
+}
+
+// One-line control: /api/do?page=weather&brightness=40. Every pair is tried; the first that fails stops it.
+static std::string doRequest(const std::vector<std::pair<std::string, std::string>> &pairs, int &code) {
+  bool settings = false;
+  code = 200;
+  for (const auto &kv : pairs) {
+    if (kv.first == "key") continue;
+    if (kv.first == "alert" && kv.second == "test") { startAlertTest(); continue; }
+    char json[96];
+    Cmd c = command(kv.first.c_str(), kv.second.c_str(), radar, watch, nowMs(), json, sizeof json);
+    if (c == Cmd::Settings) {
+      cfg.set = radar.set;
+      if (!watch.away) cfg.range_km = radar.range_km;
+      configFromJson(json, strlen(json), cfg);
+      applyConfig();
+      settings = true;
+    } else if (c != Cmd::Done) {
+      code = 400;
+      return std::string("{\"error\":\"") + (c == Cmd::Unknown ? "no such control: " : "bad value for ") + jsonEscape(kv.first) + "\"}";
+    }
+  }
+  if (!watch.away) cfg.range_km = radar.range_km;
+  (void)settings;
+  saveConfig();
+  char j[160];
+  snprintf(j, sizeof j, "{\"ok\":true,\"page\":\"%s\",\"range_km\":%d,\"away\":%s}", pageName((Page)radar.page), (int)radar.range_km, watch.away ? "true" : "false");
+  return j;
 }
 
 static int serve(int port) {
@@ -241,11 +337,19 @@ static int serve(int port) {
   for (;;) {
     int fd = accept(s, nullptr, nullptr);
     if (fd < 0) continue;
-    std::string method, path, body;
-    if (readRequest(fd, method, path, body)) {
+    std::string method, path, body, key;
+    if (readRequest(fd, method, path, body, key)) {
       std::lock_guard<std::mutex> lock(radar_mu);
       bool post = method == "POST";
-      if (path == "/frame") { render(nowMs()); auto b = bmp(); respond(fd, "image/bmp", b.data(), b.size()); }
+      std::string query;
+      if (size_t q = path.find('?'); q != std::string::npos) { query = path.substr(q + 1); path.erase(q); }
+      auto pairs = queryPairs(query);
+      for (const auto &kv : pairs) if (kv.first == "key") key = kv.second;
+      // With a control key set, only looking is free: the screen, the pages themselves and the status.
+      const bool open_to_all = !post && method != "PUT" && (path == "/" || path == "/frame" || path == "/admin" || path == "/wifi" || path == "/api/status" || path == "/api/fonts");
+      if (!open_to_all && !keyOk(cfg.api_key, key.c_str())) respondText(fd, "{\"error\":\"key needed\"}", "application/json", 401);
+      else if (path == "/api/do") { int code; std::string out = doRequest(pairs, code); respondText(fd, out, "application/json", code); }
+      else if (path == "/frame") { render(nowMs()); auto b = bmp(); respond(fd, "image/bmp", b.data(), b.size()); }
       else if (path == "/admin") respond(fd, "text/html", ADMIN_HTML, sizeof ADMIN_HTML - 1);
       else if (path == "/api/settings" && !post) respondText(fd, settingsJson(), "application/json");
       else if (path == "/api/settings") {
@@ -256,17 +360,12 @@ static int serve(int port) {
       }
       else if (path == "/api/status") respondText(fd, statusJson(), "application/json");
       else if (path == "/api/fonts") { char b[600]; respond(fd, "application/json", b, fontsJson(b, sizeof b)); }
-      else if (path == "/api/press" && post) { if (!watch.press(radar, nowMs())) radar.shortPress(); respondText(fd, "ok"); }
-      else if (path == "/api/hold" && post) { radar.longPress(); if (!watch.away) { cfg.range_km = radar.range_km; saveConfig(); } respondText(fd, "ok"); }
+      else if (path == "/api/press" && post) { doPress(Press::Short, radar, watch, nowMs()); respondText(fd, "ok"); }
+      else if (path == "/api/double" && post) { doPress(Press::Double, radar, watch, nowMs()); respondText(fd, "ok"); }
+      else if (path == "/api/hold" && post) { doPress(Press::Long, radar, watch, nowMs()); if (!watch.away) { cfg.range_km = radar.range_km; saveConfig(); } respondText(fd, "ok"); }
       // Emergencies are rare, so this pretends there is one (over New York, where there is always traffic) for three
       // minutes, to try the notice and the button.
-      else if (path == "/api/alert-test" && post) {
-        Aircraft a;
-        snprintf(a.hex, sizeof a.hex, "test01"); snprintf(a.callsign, sizeof a.callsign, "TEST7700"); snprintf(a.squawk, sizeof a.squawk, "7700");
-        a.lat = 40.64; a.lon = -73.78; a.alt_ft = 12000; a.speed_kt = 250; a.track_deg = 40; a.shape = Shape::Narrow;
-        watch = Watch(); watch.found(&a, 1); live.watch_test_until = (long)time(nullptr) + 180;
-        respondText(fd, "ok");
-      }
+      else if (path == "/api/alert-test" && post) { startAlertTest(); respondText(fd, "ok"); }
       else if (path == "/api/reboot" && post) respondText(fd, "ok");            // nothing to restart here
       // The simulator has no Wi-Fi to set up; these stand in for the device so the setup page can be worked on here.
       // Any password joins, except "wrongpass", which fails the way a bad password does.
@@ -298,6 +397,7 @@ int main(int argc, char **argv) {
   const char *font = nullptr;
   int detail = -1, alert_demo = -1;
   bool want_card = false;
+  const char *want_page = nullptr; int visitor_demo = -1;
   double home_lat = 0, home_lon = 0;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -313,6 +413,8 @@ int main(int argc, char **argv) {
     else if (a == "--detail" && i + 1 < argc) detail = atoi(argv[++i]);
     else if (a == "--live") want_live = true;
     else if (a == "--card") want_card = true;
+    else if (a == "--page" && i + 1 < argc) want_page = argv[++i];           // still frames: weather, board or log, with made-up contents
+    else if (a == "--visitor" && i + 1 < argc) visitor_demo = atoi(argv[++i]);  // still frames: this demo aircraft is an unusual visitor
     else if (a == "--alert" && i + 1 < argc) alert_demo = atoi(argv[++i]);      // still frames: this demo aircraft squawks 7700
     else if (a == "--clock" && i + 1 < argc) { int hh, mm; if (sscanf(argv[++i], "%d:%d", &hh, &mm) == 2) shot_clock = (hh % 24) * 60 + mm % 60; }
     else if (a == "--home" && i + 1 < argc) have_home = sscanf(argv[++i], "%lf,%lf", &home_lat, &home_lon) == 2;
@@ -343,6 +445,7 @@ int main(int argc, char **argv) {
 
   if (!shot) {
     live.background = [] { logos.fetchPending(radar_mu); };
+    live.after_update = afterUpdate;
     live.start(&radar, &radar_mu, nowMs);
     return serve(port);
   }
@@ -353,6 +456,25 @@ int main(int argc, char **argv) {
   if (alert_demo >= 0 && alert_demo < radar.count) {
     snprintf(radar.ac[alert_demo].squawk, sizeof radar.ac[alert_demo].squawk, "7700");
     watch.found(&radar.ac[alert_demo], 1);
+  }
+  if (visitor_demo >= 0 && visitor_demo < radar.count) {
+    radar.ac[visitor_demo].shape = Shape::Military;
+    snprintf(radar.ac[visitor_demo].type, sizeof radar.ac[visitor_demo].type, "A400");
+    visitors.check(radar, cfg.visitor_types, false, t);
+  }
+  if (want_page) {
+    Page p;
+    if (!pageByName(want_page, p)) { fprintf(stderr, "no page called %s\n", want_page); return 2; }
+    radar.page = (uint8_t)p;
+    // made-up weather, and the demo traffic as if it had all just been seen passing
+    static const char WX[] = "{\"utc_offset_seconds\":0,\"current\":{\"temperature_2m\":11.4,\"apparent_temperature\":8.2,\"relative_humidity_2m\":74,"
+        "\"precipitation\":0.4,\"weather_code\":61,\"cloud_cover\":85,\"wind_speed_10m\":22.0,\"wind_direction_10m\":240,\"wind_gusts_10m\":41.0,"
+        "\"pressure_msl\":1004.2,\"is_day\":1},\"daily\":{\"time\":[\"2026-01-07\",\"2026-01-08\",\"2026-01-09\"],\"weather_code\":[61,2,71],"
+        "\"temperature_2m_max\":[12.3,9.2,3.8],\"temperature_2m_min\":[7.7,4.9,-1.6],\"precipitation_probability_max\":[90,20,65],"
+        "\"sunrise\":[\"2026-01-07T08:05\",\"2026-01-08T08:05\",\"2026-01-09T08:04\"],\"sunset\":[\"2026-01-07T16:12\",\"2026-01-08T16:13\",\"2026-01-09T16:15\"]}}";
+    parseWeather(WX, sizeof WX - 1, pages.wx);
+    pages.seen.note(radar, 1800000000LL - 1800000000LL % 86400 + 14 * 3600 + 300, t);
+    for (int i = 0; i < pages.seen.n; i++) { pages.seen.e[i].min_km = 0.6f + 0.7f * i; pages.seen.e[i].closest_at -= 240 * i; pages.seen.e[i].last -= 240 * i; pages.seen.e[i].last_ms -= 1000 * i; }
   }
   render(t);
   auto b = bmp();

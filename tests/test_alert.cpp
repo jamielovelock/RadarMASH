@@ -52,6 +52,8 @@ TEST(alert_press_goes_to_look_and_press_again_comes_home) {
   CHECK(w.press(r, 2000));
   CHECK(w.away && r.home_lat == -33.9 && r.home_lon == 151.2 && r.range_km == 40);
   CHECK(strcmp(r.pin_hex, "e00001") == 0 && r.count == 1 && r.selected == 0);
+  w.tick(r, 1990, true);                             // a frame that read its clock just before the press
+  CHECK(w.away);
   w.tick(r, 2100, true);
   CHECK(strstr(r.alert2, "home") != nullptr);
   r.tick(2200);

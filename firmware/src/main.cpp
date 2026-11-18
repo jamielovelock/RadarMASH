@@ -36,8 +36,10 @@
 #include "admin_html.h"
 #include "alert.h"
 #include "config.h"
+#include "control.h"
 #include "feed.h"
 #include "panel_init.h"
+#include "pages.h"
 #include "radar.h"
 #include "wifi_html.h"
 #if __has_include("secrets.h")
@@ -73,6 +75,12 @@ static bool live_mode = false;
 static Watch watch;                                 // the worldwide emergency watch (see alert.h); guarded by the radar lock
 static bool clock_auto = true, zone_known = false;  // the clock: time zone from the position, and whether it has been found yet
 static int clock_offset_min = 0, zone_min = 0;
+static PageData pages;                              // what the weather, board and log pages draw from; guarded by the radar lock
+static Visitors visitors;                           // notices for unusual aircraft; guarded by the radar lock
+static Button button;
+static char api_key_now[25] = "";                   // the control key in force (a copy of the setting; empty for none)
+static char visitor_types[96] = "";
+static uint16_t page_cycle_s = 0;
 
 // True only if the external memory chip really answered and is usable as heap (the Arduino flag alone is not proof).
 static bool psramOk() { return esp_psram_is_initialized() && heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0; }
@@ -203,8 +211,15 @@ static void drawFrame(bool demo) {
   uint32_t t0 = millis();
   frame_ms = t0 - last_start; last_start = t0;             // time from one frame to the next, sending included
   Lock lock;
-  if (demo) demoTraffic(radar, t0);
+  if (demo) {
+    demoTraffic(radar, t0);
+    static uint32_t noted = 0;
+    if (t0 - noted > 2000) { noted = t0; pages.seen.note(radar, (long long)time(nullptr), t0); }
+  }
   watch.tick(radar, t0, radar.set.alerts && live_mode);
+  visitors.tick(radar, t0, radar.set.visitors);
+  pageTick(radar, watch, page_cycle_s, t0);
+  pages.utc_offset_min = clock_auto ? (zone_known ? zone_min : 0) : clock_offset_min;
   radar.clock_min = (int16_t)clockMinutes((long long)time(nullptr), clock_auto ? (zone_known ? zone_min : 0) : clock_offset_min);
   radar.clock_utc = clock_auto && !zone_known;       // zone not found yet: UTC, marked Z
   radar.tick(t0);
@@ -286,7 +301,7 @@ static bool httpsGet(const String &url, String &body) {
 
 static void pollFeed() {
   double lat, lon; int nm, limit;
-  { Lock lock; lat = radar.home_lat; lon = radar.home_lon; nm = feedRadiusNm(radar.range_km); limit = constrain((int)radar.set.max_aircraft, 1, MAX_AIRCRAFT); }
+  { Lock lock; lat = radar.home_lat; lon = radar.home_lon; nm = feedRadiusNm(radar.feedRangeKm()); limit = constrain((int)radar.set.max_aircraft, 1, MAX_AIRCRAFT); }
   String url, url_before;
   { Lock lock; url = url_before = feed_url; }
   url.replace("{lat}", String(lat, 4)); url.replace("{lon}", String(lon, 4)); url.replace("{nm}", String(nm));
@@ -311,6 +326,10 @@ static void pollFeed() {
     memcpy(fresh[i].dest, e->info.dest, sizeof fresh[i].dest);
   }
   radar.update(fresh, n, millis());
+  if (!watch.away) {                                 // what has been seen from home, and anything unusual among it
+    pages.seen.note(radar, (long long)time(nullptr), millis());
+    if (radar.set.visitors) visitors.check(radar, visitor_types, radar.set.visitor_heli, millis());
+  }
   feed_count = n; feed_ok_ms = millis(); feed_failing = 0;
 }
 
@@ -423,23 +442,26 @@ static void watchWorld() {
   if (!(watch_test_until && (int32_t)(millis() - watch_test_until) < 0)) watch.found(watch_list, n);
 }
 
-// The time zone where the radar is: asked for when the position changes, and hourly after that (summer time moves it).
+// The weather where the radar is, and with it the time zone: asked for when the position changes and every quarter of
+// an hour after that. One small request serves the clock, the weather page and dimming at sunset.
 static bool zone_wanted = false;
 static double zone_lat = 0, zone_lon = 0, zone_for_lat = 1e9, zone_for_lon = 1e9;
+static int weather_fetches = 0;
 static void lookupZone() {
   bool want; double lat, lon;
-  { Lock lock; want = zone_wanted; lat = zone_lat; lon = zone_lon; if (!want) zone_known = false; }
+  { Lock lock; want = zone_wanted; lat = zone_lat; lon = zone_lon; if (!want) { zone_known = false; pages.wx = Weather(); } }
   bool moved = lat != zone_for_lat || lon != zone_for_lon;
   uint32_t now = millis();
-  if (!want || (!moved && zone_ms && now - zone_ms < 3600000UL)) return;
+  if (!want || (!moved && zone_ms && now - zone_ms < (uint32_t)WEATHER_EVERY_S * 1000UL)) return;
   zone_for_lat = lat; zone_for_lon = lon;
-  String url = ZONE_OPEN_METEO, body;
-  url.replace("{lat}", String(lat, 2)); url.replace("{lon}", String(lon, 2));     // to about a kilometre: all a time zone needs
-  int minutes = 0;
-  bool ok = httpsGet(url, body) && parseUtcOffset(body.c_str(), body.length(), minutes);
+  String url = WEATHER_OPEN_METEO, body;
+  url.replace("{lat}", String(lat, 2)); url.replace("{lon}", String(lon, 2));     // to about a kilometre: all the weather needs
+  Weather fresh_wx;
+  bool ok = httpsGet(url, body) && parseWeather(body.c_str(), body.length(), fresh_wx);
+  body = String();
   Lock lock;
-  if (ok) { zone_known = true; zone_min = minutes; zone_ms = now | 1; }
-  else { if (moved) zone_known = false; zone_ms = (now - 3300000UL) | 1; }         // try again in five minutes
+  if (ok) { pages.wx = fresh_wx; zone_known = true; zone_min = fresh_wx.utc_offset_min; zone_ms = now | 1; weather_fetches++; }
+  else { if (moved) { zone_known = false; pages.wx = Weather(); } zone_ms = (now - (uint32_t)(WEATHER_EVERY_S - 300) * 1000UL) | 1; }   // try again in five minutes
 }
 
 // ---- keeping map tiles and logos across restarts ----
@@ -926,6 +948,7 @@ static void otaRaw(bool dry) {                      // dry comes from the route:
     if (ota.begun) esp_ota_abort(ota.h);
     ota.active = true; ota.dry = dry; ota.failed = false; ota.begun = false; ota.ok = false; ota.total = 0; ota.msg = "";
     if (viaSetupAp()) otaFail("updates are not accepted over the setup hotspot");   // it is open: anyone nearby could be on it
+    else if (!keyOk(api_key_now, server.header("X-Key").c_str())) otaFail("the control key is needed (send it as an X-Key header)");
     mbedtls_sha256_init(&ota.sha); mbedtls_sha256_starts(&ota.sha, 0);
   } else if (r.status == RAW_WRITE) {
     if (ota.failed || !r.currentSize) return;
@@ -987,7 +1010,14 @@ static uint32_t fps = 0;
 static void applyConfig() {                         // caller holds the lock (or nothing else is running yet)
   watch.comeHome(radar);                            // settings are about home: if the scope is away at an emergency, come back
   clock_auto = cfg.utc_auto; clock_offset_min = cfg.utc_offset_min;
-  zone_wanted = cfg.utc_auto && cfg.home_set; zone_lat = cfg.home_lat; zone_lon = cfg.home_lon;
+  // The weather service is only asked when something needs it: the clock's zone, the weather page or dimming by the sun.
+  zone_wanted = cfg.home_set && (cfg.utc_auto || cfg.set.page_weather || cfg.night == 1); zone_lat = cfg.home_lat; zone_lon = cfg.home_lon;
+  pages.wx_wanted = zone_wanted; pages.units = cfg.units; pages.overhead_km = cfg.overhead_km;
+  snprintf(pages.airport, sizeof pages.airport, "%s", cfg.board_airport);
+  snprintf(api_key_now, sizeof api_key_now, "%s", cfg.api_key);
+  snprintf(visitor_types, sizeof visitor_types, "%s", cfg.visitor_types);
+  page_cycle_s = cfg.page_cycle_s;
+  radar.pages = &pages;
   bool was_live = live_mode, moved = radar.home_lat != cfg.home_lat || radar.home_lon != cfg.home_lon;
   radar.set = cfg.set;
   radar.home_lat = cfg.home_lat; radar.home_lon = cfg.home_lon;
@@ -1002,19 +1032,31 @@ static void applyConfig() {                         // caller holds the lock (or
   if (was_live != live_mode || moved) { radar.count = 0; radar.selected = -1; feed_count = -1; feed_ok_ms = 0; }   // a different sky
   brightness = cfg.brightness * 1023 / 100;
 }
+// The backlight follows the setting, or the night setting when it is night. Called on a change and once a second.
+static bool night_now = false;
+static void applyBacklight() {
+  int clock_min; Weather wx;
+  { Lock lock; clock_min = radar.clock_min; wx = pages.wx; }
+  night_now = isNight(cfg.night, clock_min, wx, cfg.night_start_min, cfg.night_end_min);
+  int want = (night_now ? cfg.night_brightness : cfg.brightness) * 1023 / 100;
+  if (want != brightness) setBacklight(want);
+}
 static void markDirty() { cfg_dirty = true; cfg_dirty_ms = millis(); }
 
-static size_t currentConfigJson(char *buf, size_t n) {   // caller holds the lock
+static size_t currentConfigJson(char *buf, size_t n, bool for_saving = false) {   // caller holds the lock
   cfg.set = radar.set;                                   // the button changes these behind the page's back
   if (!watch.away) cfg.range_km = radar.range_km;        // (the range while away at an emergency is not the user's choice)
-  return configToJson(cfg, buf, n);
+  return configToJson(cfg, buf, n, for_saving);          // only the saved copy holds the control key
 }
 static void saveConfigIfDue() {
   if (!cfg_dirty || millis() - cfg_dirty_ms < 3000) return;
   char buf[CONFIG_JSON_MAX];
   size_t n;
-  { Lock lock; n = currentConfigJson(buf, sizeof buf); }
-  if (n) prefs.putString("config", buf);
+  { Lock lock; n = currentConfigJson(buf, sizeof buf, true); }
+  static uint32_t saved_sum = 0;                         // nothing changed (a page switch, say): spare the flash a write
+  uint32_t sum = 2166136261u;
+  for (size_t i = 0; i < n; i++) sum = (sum ^ (uint8_t)buf[i]) * 16777619u;
+  if (n && sum != saved_sum) { prefs.putString("config", buf); saved_sum = sum; }
   cfg_dirty = false;
 }
 static void loadConfig() {
@@ -1026,6 +1068,14 @@ static void loadConfig() {
 
 // ---- web ----
 static void touch() { last_activity_ms = millis(); }
+// The control key, if one is set: as ?key=... or an X-Key header. Sends the refusal itself.
+static bool allowed() {
+  if (!api_key_now[0]) return true;
+  String k = server.hasArg("key") ? server.arg("key") : server.header("X-Key");
+  if (keyOk(api_key_now, k.c_str())) return true;
+  server.send(401, "application/json", "{\"error\":\"key needed\"}");
+  return false;
+}
 static void ok() { server.send(200, "text/plain", "ok"); }
 
 // Timings averaged since the last call: where a frame's time goes, and how much of the screen is being sent.
@@ -1062,7 +1112,9 @@ static void hStatus() {
   j += ",\"logos\":" + String(logos_loaded) + ",\"logos_missing\":" + String(logos_missing);
   j += ",\"fs\":" + String(fs_ok ? "true" : "false") + ",\"cache_files\":" + String(cache_files) + ",\"cache_kb\":" + String(cache_bytes / 1024) + ",\"cache_hits\":" + String(cache_hits);
   j += ",\"cache_writes\":" + String(cache_writes) + ",\"cache_evictions\":" + String(cache_evictions) + ",\"fs_free_kb\":" + String(fs_ok ? (unsigned)((LittleFS.totalBytes() - LittleFS.usedBytes()) / 1024) : 0);
-  j += ",\"emergency\":\"" + String(watch.have ? watch.target.callsign : "") + "\",\"away\":" + String(watch.away ? "true" : "false") + ",\"watch_polls\":" + String(watch_polls);
+  j += ",\"emergency\":\"" + String(watch.have ? watch.target.callsign : "") + "\",\"away\":" + String(watch.away ? "true" : "false") + ",\"watch_polls\":" + String(watch_polls) + ",\"why_home\":\"" + String(watch.why_home) + "\"";
+  j += ",\"page\":\"" + String(pageName((Page)radar.page)) + "\",\"night\":" + String(night_now ? "true" : "false") + ",\"weather\":" + String(pages.wx.have ? "true" : "false") +
+       ",\"weather_fetches\":" + String(weather_fetches) + ",\"sightings\":" + String(pages.seen.n) + ",\"key_set\":" + String(api_key_now[0] ? "true" : "false");
   j += ",\"zone_min\":" + String(zone_known ? zone_min : -9999);
   j += ",\"panel_err\":" + String((int)panel_err) + ",\"cache\":" + String(radar.cache ? "true" : "false");
   j += ",\"psram\":" + String(psramOk() ? "true" : "false") + ",\"psram_free\":" + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -1089,23 +1141,60 @@ static void hSettingsPost() {
     if (good) { applyConfig(); currentConfigJson(buf, sizeof buf); }
   }
   if (!good) { server.send(400, "application/json", "{\"error\":\"not JSON\"}"); return; }
-  setBacklight(brightness);
+  applyBacklight();
   markDirty();
   server.send(200, "application/json", buf);
 }
 static void hFonts() { char b[600]; fontsJson(b, sizeof b); server.send(200, "application/json", b); }
-static void hPress() { touch(); { Lock lock; if (!watch.press(radar, millis())) radar.shortPress(); } ok(); }
+static void hPress() { touch(); { Lock lock; doPress(Press::Short, radar, watch, millis()); } ok(); }
+static void hDouble() { touch(); { Lock lock; doPress(Press::Double, radar, watch, millis()); } ok(); }
+static void hHold() { touch(); { Lock lock; doPress(Press::Long, radar, watch, millis()); } markDirty(); ok(); }
 // Emergencies are rare, so this pretends there is one (over New York, where there is always traffic) for three minutes,
 // to try the notice and the button.
-static void hAlertTest() {
-  touch();
+static void startAlertTest() {
   Aircraft a;
   snprintf(a.hex, sizeof a.hex, "test01"); snprintf(a.callsign, sizeof a.callsign, "TEST7700"); snprintf(a.squawk, sizeof a.squawk, "7700");
   a.lat = 40.64; a.lon = -73.78; a.alt_ft = 12000; a.speed_kt = 250; a.track_deg = 40; a.shape = Shape::Narrow;
-  { Lock lock; watch.comeHome(radar); watch = Watch(); watch.found(&a, 1); watch_test_until = (millis() + 180000UL) | 1; }
-  ok();
+  Lock lock;
+  watch.comeHome(radar, "test"); watch = Watch(); watch.found(&a, 1); watch_test_until = (millis() + 180000UL) | 1;
 }
-static void hHold() { touch(); { Lock lock; radar.longPress(); } markDirty(); ok(); }
+static void hAlertTest() { touch(); startAlertTest(); ok(); }
+
+// One-line control for other things on the network: /api/do?page=weather&brightness=40 (GET, POST or PUT). Each
+// name=value is carried out in turn; the first that makes no sense stops it. See core/control.h for the names.
+static void hDo() {
+  touch();
+  bool changed = false;
+  for (int i = 0; i < server.args(); i++) {
+    String name = server.argName(i), value = server.arg(i);
+    if (name == "key" || name == "plain") continue;
+    if (name == "alert" && value == "test") { startAlertTest(); continue; }
+    char json[96];
+    Cmd c;
+    {
+      Lock lock;
+      c = command(name.c_str(), value.c_str(), radar, watch, millis(), json, sizeof json);
+      if (c == Cmd::Settings) {
+        cfg.set = radar.set;
+        if (!watch.away) cfg.range_km = radar.range_km;
+        configFromJson(json, strlen(json), cfg);
+        applyConfig();
+        changed = true;
+      }
+    }
+    if (c == Cmd::Unknown || c == Cmd::Bad) {
+      char esc[40]; jsonEscape(name.substring(0, 16).c_str(), esc, sizeof esc);
+      server.send(400, "application/json", String("{\"error\":\"") + (c == Cmd::Unknown ? "no such control: " : "bad value for ") + esc + "\"}");
+      if (changed) { applyBacklight(); markDirty(); }
+      return;
+    }
+  }
+  applyBacklight();
+  markDirty();                                       // (a range or switch may have changed; saving the same thing again is skipped below)
+  char j[120];
+  { Lock lock; snprintf(j, sizeof j, "{\"ok\":true,\"page\":\"%s\",\"range_km\":%d,\"away\":%s}", pageName((Page)radar.page), (int)radar.range_km, watch.away ? "true" : "false"); }
+  server.send(200, "application/json", j);
+}
 
 // Exercise the external memory chip: write a pattern across a block, read it back, and time both.
 static void hPsramTest() {
@@ -1241,30 +1330,39 @@ void setup() {
     if (viaSetupAp()) { server.sendHeader("Location", "http://192.168.4.1/wifi"); server.send(302, "text/plain", ""); }
     else server.send(404, "text/plain", "not found");
   });
+  // With a control key set, only looking is free (the pages themselves and the status); everything that changes
+  // something, or tells where the radar is, needs the key. The Wi-Fi setup calls stay open while the setup hotspot is
+  // up, or a radar that has lost its network could not be given a new one.
+  #define KEYED(h) ([]() { if (allowed()) h(); })
+  #define KEYED_UNLESS_SETUP(h) ([]() { if (portal || allowed()) h(); })
+  static const char *KEY_HEADER[] = {"X-Key"};
+  server.collectHeaders(KEY_HEADER, 1);
   server.on("/wifi", hWifiPage);
-  server.on("/api/wifi/scan", hWifiScan);
-  server.on("/api/wifi/status", hWifiStatus);
-  server.on("/api/wifi", HTTP_POST, hWifiJoin);
-  server.on("/api/wifi/portal", HTTP_POST, hWifiPortal);
-  server.on("/api/keep", HTTP_POST, hKeep);
-  server.on("/api/trial-again", HTTP_POST, hTrialAgain);
+  server.on("/api/wifi/scan", KEYED_UNLESS_SETUP(hWifiScan));
+  server.on("/api/wifi/status", KEYED_UNLESS_SETUP(hWifiStatus));
+  server.on("/api/wifi", HTTP_POST, KEYED_UNLESS_SETUP(hWifiJoin));
+  server.on("/api/wifi/portal", HTTP_POST, KEYED(hWifiPortal));
+  server.on("/api/keep", HTTP_POST, KEYED(hKeep));
+  server.on("/api/trial-again", HTTP_POST, KEYED(hTrialAgain));
   server.on("/", hUi);
   server.on("/api/status", hStatus);
   server.on("/status", hStatus);                       // older name, kept for scripts
-  server.on("/api/settings", HTTP_GET, hSettingsGet);
-  server.on("/api/settings", HTTP_POST, hSettingsPost);
+  server.on("/api/settings", HTTP_GET, KEYED(hSettingsGet));
+  server.on("/api/settings", HTTP_POST, KEYED(hSettingsPost));
   server.on("/api/fonts", hFonts);
-  server.on("/api/press", HTTP_POST, hPress);
-  server.on("/api/hold", HTTP_POST, hHold);
-  server.on("/api/alert-test", HTTP_POST, hAlertTest);
-  server.on("/api/reboot", HTTP_POST, hReboot);
-  server.on("/reboot", hReboot);
+  server.on("/api/do", KEYED(hDo));                    // any method: GET for a Stream Deck, PUT or POST for the tidy-minded
+  server.on("/api/press", HTTP_POST, KEYED(hPress));
+  server.on("/api/double", HTTP_POST, KEYED(hDouble));
+  server.on("/api/hold", HTTP_POST, KEYED(hHold));
+  server.on("/api/alert-test", HTTP_POST, KEYED(hAlertTest));
+  server.on("/api/reboot", HTTP_POST, KEYED(hReboot));
+  server.on("/reboot", KEYED(hReboot));
   server.on("/perf", hPerf);
-  server.on("/psramtest", hPsramTest);
-  server.on("/tlstest", hTlsTest);
-  server.on("/stay", hStay);
-  server.on("/stock", hStock);
-  server.on("/ota", HTTP_POST, hOtaDone, hOtaRaw);
+  server.on("/psramtest", KEYED(hPsramTest));
+  server.on("/tlstest", KEYED(hTlsTest));
+  server.on("/stay", KEYED(hStay));
+  server.on("/stock", KEYED(hStock));
+  server.on("/ota", HTTP_POST, hOtaDone, hOtaRaw);     // (the key is checked as the upload starts: see otaRaw)
   server.on("/ota/dry", HTTP_POST, hOtaDone, hOtaDryRaw);
   server.begin();
   xTaskCreatePinnedToCore(feedTask, "feed", 12288, nullptr, 1, nullptr, 0);
@@ -1278,20 +1376,23 @@ void setup() {
 }
 
 void loop() {
-  static uint32_t btn_change_ms = 0, btn_down_ms = 0;
-  static bool btn_raw_last = false, btn_down = false, long_done = false;
   server.handleClient();
   uint32_t now = millis();
 
-  bool raw = digitalRead(PIN_BTN) == LOW;                    // active low, 30 ms debounce
-  if (raw != btn_raw_last) { btn_raw_last = raw; btn_change_ms = now; }
-  if (raw != btn_down && now - btn_change_ms > 30) {
-    btn_down = raw; last_activity_ms = now;
-    if (btn_down) { btn_down_ms = now; long_done = false; }
-    else if (!long_done) { Lock lock; if (!watch.press(radar, now)) radar.shortPress(); }
+  const bool held = digitalRead(PIN_BTN) == LOW;             // active low
+  static bool was_held = false;
+  if (held != was_held) { was_held = held; last_activity_ms = now; }
+  Press press = button.feed(held, now);
+  if (press == Press::Reset) {                               // five quick presses: forget the control key
+    Lock lock;
+    cfg.api_key[0] = 0; api_key_now[0] = 0;
+    visitors.say("Control key", "removed", now, 6000);
+    markDirty();
+  } else if (press != Press::None) {
+    { Lock lock; doPress(press, radar, watch, now); }
+    if (press == Press::Long) markDirty();                   // the range is a setting
   }
-  if (btn_down && !long_done && now - btn_down_ms > 700) { long_done = true; { Lock lock; radar.longPress(); } markDirty(); }
-  if (btn_down && now - btn_down_ms > 8000) { snprintf(boot_note, sizeof boot_note, "back to other firmware"); drawFrame(!live_mode); delay(150); goHome(); }
+  if (button.heldMs(now) > 8000) { snprintf(boot_note, sizeof boot_note, "back to other firmware"); drawFrame(!live_mode); delay(150); goHome(); }
 
   drawFrame(!live_mode);
 
@@ -1303,6 +1404,7 @@ void loop() {
     const esp_partition_t *bp = esp_ota_get_boot_partition();
     armed_for_trial = !is_confirmed && bp && bp->address == running_p->address;
     saveConfigIfDue();
+    applyBacklight();                                                                 // night falls, or ends
   }
   // Unconfirmed and left alone: go back to the other firmware. Not while armed for another trial start, though: the
   // restart would boot this firmware again and re-arm the other one, quietly undoing the arming. (That happened: the

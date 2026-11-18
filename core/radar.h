@@ -65,6 +65,12 @@ struct Settings {
   bool map = true;            // map underlay, when one has been loaded
   bool clock = true;          // the time of day at the bottom of the scope, once the time is known
   bool alerts = true;         // watch the whole world for an aircraft in distress (squawking 7700) and offer to go and look
+  bool visitors = true;       // a notice when a military aircraft, or a type on the user's list, comes into view
+  bool visitor_heli = false;  // ... and for helicopters too
+  bool auto_range = false;    // the range follows the nearest aircraft
+  bool page_weather = true;   // which pages a double press (or the page timer) goes round; the radar is always one
+  bool page_board = true;
+  bool page_log = true;
   MapStyle map_style = MapStyle::Dark;
   uint8_t map_brightness = 55;                // percent
   uint8_t max_aircraft = 10;                  // show at most this many, nearest home first (up to MAX_AIRCRAFT)
@@ -92,6 +98,9 @@ struct ScopeCache {
 constexpr int MAX_AIRCRAFT = 64;
 constexpr float RADAR_RADIUS = 172.0f;    // outer range ring, in pixels
 constexpr float RANGES_KM[] = {10, 20, 40, 80, 160};   // the zoom levels a long press steps through
+constexpr float AUTO_RANGE_MAX_KM = 80;   // how far out "the range follows the nearest aircraft" looks
+
+struct PageData;                          // see pages.h
 
 struct Radar {
   Settings set;
@@ -106,7 +115,11 @@ struct Radar {
   char map_credit[28] = "";                     // attribution the map source asks for, shown at the bottom
   int16_t clock_min = -1;                       // minutes since midnight to show as the time, or -1 if not known; set by the caller
   bool clock_utc = false;                       // the time is UTC, not local: shown with a Z
-  char alert[24] = "", alert2[40] = "";         // two lines of flashing notice at the top; empty for none (see alert.h)
+  char alert[24] = "", alert2[40] = "";         // two lines of notice at the top; empty for none (see alert.h)
+  uint8_t alert_style = 0;                      // 0: an emergency, red and flashing. 1: a visitor, amber and steady
+  uint8_t page = 0;                             // which page is showing (a Page; 0 is the radar)
+  uint32_t page_since_ms = 0;
+  const PageData *pages = nullptr;              // what the other pages draw from, owned by the caller; see pages.h
   char pin_hex[7] = "";                         // when set, the highlight stays on this aircraft instead of cycling
   float sweep_deg = 0;        // current sweep bearing
   uint32_t now_ms = 0, last_cycle_ms = 0;
@@ -116,6 +129,7 @@ struct Radar {
   void update(Aircraft *fresh, int n, uint32_t now_ms);
   void shortPress();                            // highlight the next aircraft in view
   void longPress();                             // step to the next range (zoom level)
+  float feedRangeKm() const;                    // how far out to ask the feed for aircraft
   void prepare();                               // once per frame before draw(): brings the cache up to date, if there is one
   void draw(Canvas &c) const;                   // draw this canvas's band of the screen
 
@@ -124,6 +138,7 @@ struct Radar {
 
 private:
   void layoutLabels() const;                    // decides where every label and the tag box go, once per frame
+  uint32_t range_auto_ms_ = 0;
   mutable uint32_t layout_key_ = 0;
   mutable int16_t tag_x_ = 0, tag_y_ = 0, tag_w_ = 0, tag_h_ = 0;
   mutable const Logo *tag_logo_ = nullptr;
