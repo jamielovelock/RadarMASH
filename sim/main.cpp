@@ -398,6 +398,7 @@ int main(int argc, char **argv) {
   int detail = -1, alert_demo = -1;
   bool want_card = false;
   const char *want_page = nullptr; int visitor_demo = -1;
+  const char *on[8]; int n_on = 0;
   double home_lat = 0, home_lon = 0;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -413,13 +414,14 @@ int main(int argc, char **argv) {
     else if (a == "--detail" && i + 1 < argc) detail = atoi(argv[++i]);
     else if (a == "--live") want_live = true;
     else if (a == "--card") want_card = true;
+    else if (a == "--on" && i + 1 < argc && n_on < 8) on[n_on++] = argv[++i];   // still frames: a switch that is off by default
     else if (a == "--page" && i + 1 < argc) want_page = argv[++i];           // still frames: weather, board or log, with made-up contents
     else if (a == "--visitor" && i + 1 < argc) visitor_demo = atoi(argv[++i]);  // still frames: this demo aircraft is an unusual visitor
     else if (a == "--alert" && i + 1 < argc) alert_demo = atoi(argv[++i]);      // still frames: this demo aircraft squawks 7700
     else if (a == "--clock" && i + 1 < argc) { int hh, mm; if (sscanf(argv[++i], "%d:%d", &hh, &mm) == 2) shot_clock = (hh % 24) * 60 + mm % 60; }
     else if (a == "--home" && i + 1 < argc) have_home = sscanf(argv[++i], "%lf,%lf", &home_lat, &home_lon) == 2;
     else {
-      fprintf(stderr, "usage: %s [--port n] [--live --home lat,lon] [--no-map]\n       %s --shot out.bmp [--t ms] [--select n] [--range km] [--map] [--style 0-2] [--font id]\n", argv[0], argv[0]);
+      fprintf(stderr, "usage: %s [--port n] [--live --home lat,lon] [--no-map]\n       %s --shot out.bmp [--t ms] [--select n] [--range km] [--map] [--style 0-2] [--font id] [--on switch]\n", argv[0], argv[0]);
       return 2;
     }
   }
@@ -453,6 +455,11 @@ int main(int argc, char **argv) {
   demoTraffic(radar, t);
   radar.selected = select;
   if (want_card) radar.set.card = true;
+  for (int i = 0; i < n_on; i++) {
+    bool *sw = toggleByName(radar.set, on[i]);
+    if (!sw) { fprintf(stderr, "no switch called %s\n", on[i]); return 2; }
+    *sw = true;
+  }
   if (alert_demo >= 0 && alert_demo < radar.count) {
     snprintf(radar.ac[alert_demo].squawk, sizeof radar.ac[alert_demo].squawk, "7700");
     watch.found(&radar.ac[alert_demo], 1);

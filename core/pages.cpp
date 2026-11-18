@@ -355,7 +355,7 @@ static void drawBoard(Canvas &c, const PageData &d) {
   }
 }
 
-static void drawLog(Canvas &c, const PageData &d) {
+static void drawLog(Canvas &c, const Settings &set, const PageData &d) {
   pageFrame(c);
   char line[64], hm[8];
   c.textCentred(180, 40, "Overhead", 3, COL_HI);
@@ -368,7 +368,7 @@ static void drawLog(Canvas &c, const PageData &d) {
     const Sighting &s = *rows[i];
     const int y = 90 + i * 40;
     timeText(s.closest_at, d.utc_offset_min, hm);
-    snprintf(line, sizeof line, "%s %s %s", hm, s.callsign[0] ? s.callsign : s.hex, s.type);
+    snprintf(line, sizeof line, "%s %s %s", hm, s.callsign[0] ? s.callsign : s.hex, typeShown(set, s.type));
     c.textCentred(180, y, line, 2, COL_TEXT);
     int k = snprintf(line, sizeof line, "FL%03d  %.1f km", s.alt_ft / 100, (double)s.min_km);
     if (s.origin[0] && s.dest[0]) snprintf(line + k, sizeof line - k, "  %s > %s", s.origin, s.dest);
@@ -380,7 +380,7 @@ void drawPage(Canvas &c, const Radar &r, const PageData &d) {
   switch ((Page)r.page) {
     case Page::Weather: drawWeather(c, d); break;
     case Page::Board: drawBoard(c, d); break;
-    case Page::Log: drawLog(c, d); break;
+    case Page::Log: drawLog(c, r.set, d); break;
     default: break;
   }
 }
@@ -414,14 +414,16 @@ void Visitors::check(Radar &r, const char *types, bool helicopters, uint32_t now
     memcpy(seen[next], a.hex, sizeof seen[next]); seen_ms[next] = now; next = (next + 1) % 16;
     if (busy) continue;                                 // one notice at a time; the others are simply marked as seen
     const char *name = a.callsign[0] ? a.callsign : a.hex;
-    if (listed) snprintf(line1, sizeof line1, "%.4s %.8s", a.type, name);
+    const char *type = typeShown(r.set, a.type);
+    if (strlen(type) + strlen(name) > 17) type = a.type;   // the heading is one line of the notice: a long name gives way to the code
+    if (listed) snprintf(line1, sizeof line1, "%.14s %.8s", type, name);
     else snprintf(line1, sizeof line1, "%s %.8s", mil ? "MILITARY" : "HELICOPTER", name);
     const double kx = 111.32 * cos(r.home_lat * 3.14159265358979 / 180.0);
     float east = (float)((a.lon - r.home_lon) * kx), north = (float)((a.lat - r.home_lat) * 110.57);
     float bearing = atan2f(east, north) * 180.0f / PI_F;
     int km = (int)lroundf(sqrtf(east * east + north * north));
     int k = 0;
-    if (!listed && a.type[0]) k = snprintf(line2, sizeof line2, "%.4s  ", a.type);
+    if (!listed && a.type[0]) k = snprintf(line2, sizeof line2, "%.14s  ", typeShown(r.set, a.type));
     snprintf(line2 + k, sizeof line2 - k, "%d km %s  FL%03d", km > 999 ? 999 : km, compass(bearing), a.alt_ft / 100);
     until = (now + 30000UL) | 1; forced = false;
     busy = true;

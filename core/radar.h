@@ -56,6 +56,7 @@ struct Settings {
   bool tag = true;            // small box beside the highlighted aircraft; the tag_ switches choose what it shows
   bool tag_route = true;
   bool tag_type = true;
+  bool type_names = false;    // the type in words where it is known: A380-800 for A388
   bool tag_level = true;
   bool tag_speed = false;
   bool auto_cycle = true;     // highlight each aircraft in view in turn
@@ -149,5 +150,13 @@ private:
 
 // Moving made-up traffic around wherever home is, for the simulator and for a demo mode on the device.
 void demoTraffic(Radar &r, uint32_t now_ms);
+
+// Aircraft types in words. typeName: "A380-800" for "A388", or nullptr for a code not in the list. typeShown: what to
+// put on the screen, which is the name when the setting asks for names and there is one, and the code otherwise.
+constexpr int TYPE_NAME_MAX = 14;                     // no name is longer than this
+extern const int TYPE_NAME_COUNT;
+const char *typeCodeAt(int i);
+const char *typeName(const char *code);
+const char *typeShown(const Settings &s, const char *code);
 
 }  // namespace rm

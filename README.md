@@ -57,6 +57,7 @@ Named for Radar O'Reilly, who always heard the choppers first.
 - Live positions from free community feeds, gliding smoothly between updates.
 - Different shapes for light aircraft, single-aisle and twin-aisle airliners, helicopters and military aircraft.
 - A tag box that steps through the aircraft in view: callsign, route, type, level and speed, your choice of which.
+- Aircraft types as codes or in words: A388 or A380-800, one switch (about 190 common types; the rest keep their code).
 - Airline name, origin and destination, **checked for sense**. Route databases are often wrong, because flight numbers
   get reused. RadarMASH tests each route against where the aircraft is, which way it is heading and whether it is
   climbing or descending, asks a second source when the first does not fit, and shows nothing sooner than something wrong.
@@ -255,7 +256,7 @@ in one request, and the reply says what is showing:
 | `brightness` | `1` to `100` | Backlight |
 | `select` | a callsign | Highlight that aircraft |
 | `alert` | `look` `home` `test` | Go to the emergency on offer, come back, or try a pretend one |
-| any switch | `on` `off` `toggle` | `sweep` `rings` `labels` `altitude` `trails` `fade` `shapes` `auto_cycle` `tag` `card` `map` `declutter` `logos` `clock` `alerts` `visitors` `auto_range` and the rest: the names are the ones in `/api/settings` |
+| any switch | `on` `off` `toggle` | `sweep` `rings` `labels` `altitude` `trails` `fade` `shapes` `auto_cycle` `tag` `card` `map` `declutter` `logos` `clock` `alerts` `visitors` `auto_range` `type_names` and the rest: the names are the ones in `/api/settings` |
 | a few numbers | | `map_style` `map_brightness` `max_aircraft` `sweep_seconds` `refresh_s` `night` `night_brightness` `units` `page_cycle_s` `overhead_km` |
 
 It deliberately cannot change where the radar is, where its data comes from, or the key: those stay on the settings page.

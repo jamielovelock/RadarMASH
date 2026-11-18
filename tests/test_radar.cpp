@@ -300,7 +300,7 @@ TEST(every_switch_changes_the_picture) {
   const Pixels base = fresh();
   bool Settings::*const switches[] = {&Settings::sweep, &Settings::rings, &Settings::labels, &Settings::altitude, &Settings::trails, &Settings::fade,
                                       &Settings::shapes, &Settings::tag, &Settings::tag_route, &Settings::tag_type,
-                                      &Settings::tag_level, &Settings::tag_speed, &Settings::card, &Settings::declutter};
+                                      &Settings::tag_level, &Settings::tag_speed, &Settings::card, &Settings::declutter, &Settings::type_names};
   for (auto sw : switches) {
     r->set.*sw = !(r->set.*sw);
     CHECK(fresh() != base);
@@ -511,4 +511,26 @@ TEST(awkward_aircraft_data_does_not_break_drawing) {
   r->count = MAX_AIRCRAFT;                         // a full list of blank entries
   r->selected = MAX_AIRCRAFT - 1;
   CHECK(renderWhole(*r).size() == (size_t)SCREEN_W * SCREEN_H);
+}
+
+TEST(type_names_are_short_unique_and_fall_back_to_the_code) {
+  CHECK(TYPE_NAME_COUNT > 150);
+  for (int i = 0; i < TYPE_NAME_COUNT; i++) {
+    const char *code = typeCodeAt(i), *name = typeName(code);
+    CHECK(code && name);
+    CHECK(strlen(code) >= 2 && strlen(code) <= 4);           // what an Aircraft's type field can hold
+    CHECK(strlen(name) >= 1 && (int)strlen(name) <= TYPE_NAME_MAX);
+    for (int k = 0; k < i; k++) CHECK(strcmp(typeCodeAt(k), code) != 0);
+  }
+  CHECK(typeCodeAt(-1) == nullptr && typeCodeAt(TYPE_NAME_COUNT) == nullptr);
+  CHECK(strcmp(typeName("A388"), "A380-800") == 0);
+  CHECK(strcmp(typeName("B77W"), "777-300ER") == 0);
+  CHECK(typeName("ZZZZ") == nullptr && typeName("") == nullptr && typeName(nullptr) == nullptr);
+  Settings s;
+  CHECK(!s.type_names);                                      // codes unless asked
+  CHECK(strcmp(typeShown(s, "A388"), "A388") == 0);
+  s.type_names = true;
+  CHECK(strcmp(typeShown(s, "A388"), "A380-800") == 0);
+  CHECK(strcmp(typeShown(s, "ZZZZ"), "ZZZZ") == 0);          // not in the list: the code, as before
+  CHECK(strcmp(typeShown(s, ""), "") == 0);
 }
