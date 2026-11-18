@@ -1,6 +1,7 @@
 // RadarMASH - open firmware for the GeekMagic Radar 360.
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "radar.h"
+#include "alert.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -13,7 +14,7 @@ static const uint32_t CYCLE_MS = 5000;
 
 static const Color COL_RING = rgb(0, 120, 60), COL_TEXT_DIM = rgb(0, 150, 80), COL_SWEEP = rgb(140, 255, 190);
 static const Color COL_BLIP = rgb(255, 190, 60), COL_MIL = rgb(255, 110, 90), COL_LABEL = rgb(230, 230, 230), COL_SEL = rgb(255, 240, 80);
-static const Color COL_CARD = rgb(0, 14, 8), COL_ROUTE = rgb(120, 220, 255);
+static const Color COL_CARD = rgb(0, 14, 8), COL_ROUTE = rgb(120, 220, 255), COL_EMERG = rgb(255, 50, 40);
 
 // atan2 accurate to about 0.01 rad; plenty for a sweep trail and much cheaper than the library call per pixel
 static inline float fastAtan2(float y, float x) {
@@ -34,7 +35,7 @@ const Toggle TOGGLES[] = {
   {"tag", "Tag box", &Settings::tag}, {"tag_route", "Tag: route", &Settings::tag_route}, {"tag_type", "Tag: type", &Settings::tag_type},
   {"tag_level", "Tag: level", &Settings::tag_level}, {"tag_speed", "Tag: speed", &Settings::tag_speed},
   {"card", "Large card", &Settings::card}, {"map", "Map", &Settings::map}, {"declutter", "Avoid overlapping labels", &Settings::declutter},
-  {"logos", "Airline logos", &Settings::logos},
+  {"logos", "Airline logos", &Settings::logos}, {"clock", "Clock", &Settings::clock}, {"alerts", "Emergency alerts", &Settings::alerts},
 };
 const int TOGGLE_COUNT = (int)(sizeof TOGGLES / sizeof TOGGLES[0]);
 
@@ -108,6 +109,12 @@ void Radar::tick(uint32_t t) {
   const uint32_t period = (uint32_t)(set.sweep_seconds < 1 ? 1 : set.sweep_seconds) * 1000u;
   sweep_deg = (float)(t % period) * 360.0f / (float)period;
   float x, y;
+  if (pin_hex[0]) {                                                  // held on one aircraft: no cycling
+    selected = -1;
+    for (int i = 0; i < count; i++)
+      if (strcmp(ac[i].hex, pin_hex) == 0 && project(ac[i], x, y)) { selected = i; break; }
+    return;
+  }
   bool gone = selected >= 0 && (selected >= count || !project(ac[selected], x, y));   // flew out of view
   if (set.auto_cycle && (selected < 0 || gone || t - last_cycle_ms >= CYCLE_MS)) {
     selected = nextInView(*this, selected, true);
@@ -420,6 +427,7 @@ static void tagText(const Settings &set, const Aircraft &a, char *route, size_t 
   route[0] = 0; data[0] = 0;
   if (set.tag_route && a.origin[0] && a.dest[0]) snprintf(route, rn, "%s>%s", a.origin, a.dest);
   int n = 0;
+  if (isEmergencySquawk(a.squawk)) n += snprintf(data + n, dn - n, "%s ", a.squawk);
   if (set.tag_type && a.type[0]) n += snprintf(data + n, dn - n, "%s ", a.type);
   if (set.tag_level) n += snprintf(data + n, dn - n, "FL%03d ", a.alt_ft / 100);
   if (set.tag_speed) n += snprintf(data + n, dn - n, "%dkt ", (int)a.speed_kt);
@@ -427,6 +435,8 @@ static void tagText(const Settings &set, const Aircraft &a, char *route, size_t 
 }
 
 struct Box { int x0, y0, x1, y1; };                                  // x1 and y1 are one past the last pixel
+// Where the clock and the alert notice sit: both centred, the clock low and the notice high.
+static const int CLOCK_Y = 312, CLOCK_X0 = 146, ALERT_Y = 30, ALERT_X0 = 82, ALERT_H = 38;
 static inline int overlap(const Box &a, const Box &b) {
   int w = (a.x1 < b.x1 ? a.x1 : b.x1) - (a.x0 > b.x0 ? a.x0 : b.x0), h = (a.y1 < b.y1 ? a.y1 : b.y1) - (a.y0 > b.y0 ? a.y0 : b.y0);
   return w > 0 && h > 0 ? w * h : 0;
@@ -444,9 +454,10 @@ void Radar::layoutLabels() const {
   auto mixin = [&key](uint32_t v) { key = (key ^ v) * 16777619u; };
   mixin(now_ms); mixin((uint32_t)count); mixin((uint32_t)selected); mixin((uint32_t)(range_km * 16)); mixin(set.font);
   mixin((set.labels ? 1u : 0) | (set.altitude ? 2u : 0) | (set.tag ? 4u : 0) | (set.tag_route ? 8u : 0) | (set.tag_type ? 16u : 0) |
-        (set.tag_level ? 32u : 0) | (set.tag_speed ? 64u : 0) | (set.declutter ? 128u : 0) | (set.logos ? 256u : 0));
+        (set.tag_level ? 32u : 0) | (set.tag_speed ? 64u : 0) | (set.declutter ? 128u : 0) | (set.logos ? 256u : 0) | (set.card ? 512u : 0) |
+        (set.clock && clock_min >= 0 ? 1024u : 0) | (alert[0] ? 2048u : 0));
   // the highlighted aircraft's logo may arrive at any moment; when it does the box grows to hold it
-  const Logo *logo = set.logos && logos && set.tag && selected >= 0 && selected < count && ac[selected].airline_icao[0] ? logos->logo(ac[selected].airline_icao) : nullptr;
+  const Logo *logo = set.logos && logos && (set.tag || set.card) && selected >= 0 && selected < count && ac[selected].airline_icao[0] ? logos->logo(ac[selected].airline_icao) : nullptr;
   mixin((uint32_t)(uintptr_t)logo);
   for (int i = 0; i < count; i++) { mixin((uint32_t)(int32_t)(ac[i].lat * 1e5)); mixin((uint32_t)(int32_t)(ac[i].lon * 1e5)); mixin((uint8_t)ac[i].callsign[0]); }
   if (key == layout_key_) return;                                    // same frame: already done
@@ -461,6 +472,9 @@ void Radar::layoutLabels() const {
     seen[i] = project(ac[i], sx[i], sy[i]);
     if (seen[i]) taken[n_taken++] = Box{(int)sx[i] - 12, (int)sy[i] - 12, (int)sx[i] + 13, (int)sy[i] + 13};
   }
+  const int n_icons = n_taken;                                       // what follows is furniture, not aircraft
+  if (set.clock && clock_min >= 0) taken[n_taken++] = Box{CLOCK_X0, CLOCK_Y, SCREEN_W - CLOCK_X0, CLOCK_Y + lineHeight(2) + 4};
+  if (alert[0]) taken[n_taken++] = Box{ALERT_X0, ALERT_Y, SCREEN_W - ALERT_X0, ALERT_Y + ALERT_H};
 
   tag_w_ = 0;
   tag_logo_ = logo;
@@ -477,8 +491,11 @@ void Radar::layoutLabels() const {
     const int x = (int)sx[selected], y = (int)sy[selected], gap = 20;
     const int cand[4][2] = {{x + gap, y - h / 2}, {x - gap - w, y - h / 2}, {x - w / 2, y + gap}, {x - w / 2, y - gap - h}};
     int bx = cand[0][0], by = cand[0][1];
-    for (int k = 0; k < 4; k++)
-      if (boxInScope(Box{cand[k][0], cand[k][1], cand[k][0] + w, cand[k][1] + h}, 3)) { bx = cand[k][0]; by = cand[k][1]; break; }
+    const Box notice{ALERT_X0, ALERT_Y, SCREEN_W - ALERT_X0, ALERT_Y + ALERT_H};
+    for (int k = 0; k < 4; k++) {
+      Box b{cand[k][0], cand[k][1], cand[k][0] + w, cand[k][1] + h};
+      if (boxInScope(b, 3) && !(alert[0] && overlap(b, notice))) { bx = cand[k][0]; by = cand[k][1]; break; }   // on the glass and clear of the notice
+    }
     tag_x_ = (int16_t)bx; tag_y_ = (int16_t)by; tag_w_ = (int16_t)w; tag_h_ = (int16_t)h;
     taken[n_taken++] = Box{bx - 2, by - 2, bx + w + 2, by + h + 2};
   }
@@ -500,7 +517,7 @@ void Radar::layoutLabels() const {
       int cost = boxInScope(b, 4) ? 0 : 1000000;                     // off the glass is worse than any overlap
       if (set.declutter)
         for (int q = 0; q < n_taken; q++) {
-          if (taken[q].x0 == (int)sx[i] - 12 && taken[q].y0 == (int)sy[i] - 12) continue;   // its own icon
+          if (q < n_icons && taken[q].x0 == (int)sx[i] - 12 && taken[q].y0 == (int)sy[i] - 12) continue;   // its own icon
           cost += overlap(b, taken[q]);
         }
       if (best < 0 || cost < best_cost) { best = k; best_cost = cost; }
@@ -544,9 +561,10 @@ static void drawTag(Canvas &c, const Settings &set, const Aircraft &a, int bx, i
 
 static void drawAircraft(Canvas &c, const Radar &r, const Aircraft &a, float x, float y, bool sel, const int16_t *tag, const Logo *logo) {
   const Settings &set = r.set;
-  Color col = sel ? COL_SEL : a.shape == Shape::Military ? COL_MIL : COL_BLIP;
+  const bool emerg = isEmergencySquawk(a.squawk);                    // in distress: red, never faded, with a pulsing ring
+  Color col = emerg ? COL_EMERG : sel ? COL_SEL : a.shape == Shape::Military ? COL_MIL : COL_BLIP;
   Color label = COL_LABEL, level = COL_TEXT_DIM;
-  if (set.fade && set.sweep && !sel) {                               // the highlighted aircraft always stays bright
+  if (set.fade && set.sweep && !sel && !emerg) {                               // the highlighted aircraft always stays bright
     float f = sweepFade(x, y, r.sweep_deg);
     col = dim(col, f); label = dim(label, f); level = dim(level, f);
   }
@@ -556,6 +574,7 @@ static void drawAircraft(Canvas &c, const Radar &r, const Aircraft &a, float x, 
   if (y + 90 < c.y0 || y - 90 >= c.y0 + c.rows) return;
   drawIcon(c, set.shapes ? a.shape : Shape::Unknown, x, y, a.track_deg, col);
   if (sel) c.ring(x, y, 17, COL_SEL);
+  if (emerg) c.ring(x, y, 20.0f + (float)(r.now_ms % 1000) * 0.008f, COL_EMERG);
   if (sel && set.tag && tag[2] > 0) { drawTag(c, set, a, tag[0], tag[1], tag[2], tag[3], logo); return; }
   if (!set.labels && !sel) return;
   const int h2 = lineHeight(2);
@@ -568,12 +587,12 @@ static void drawAircraft(Canvas &c, const Radar &r, const Aircraft &a, float x, 
   if (set.altitude) {
     char fl[12];                                                     // room for any int, however odd the data
     snprintf(fl, sizeof fl, "%03d", a.alt_ft / 100);
-    c.text(a.label_x, a.label_y + h2 + 2, fl, 1, level);
+    c.text(a.label_x, a.label_y + h2 + 2, emerg ? a.squawk : fl, 1, emerg ? COL_EMERG : level);
   }
 }
 
 // The card takes the half of the screen the selected aircraft is not in, so it never hides its own aircraft.
-static void drawCard(Canvas &c, const Aircraft &a, bool at_top) {
+static void drawCard(Canvas &c, const Aircraft &a, bool at_top, const Logo *logo) {
   const int top = at_top ? 0 : 208, bottom = at_top ? 152 : SCREEN_H;
   const int y = at_top ? 34 : top + 9;                               // first text line
   c.blendRect(0, top, SCREEN_W, bottom - top, COL_CARD, 225);
@@ -583,7 +602,11 @@ static void drawCard(Canvas &c, const Aircraft &a, bool at_top) {
   if (a.origin[0] && a.dest[0]) snprintf(line, sizeof line, "%s > %s", a.origin, a.dest);
   else snprintf(line, sizeof line, "no route");
   const int medium = lineHeight(2) + 7, large = lineHeight(3) + 8;   // 23 and 32 with the classic font
-  c.textCentred(180, y + medium, line, 3, COL_ROUTE);
+  if (logo) {                                                        // the logo sits beside the route, the pair centred
+    const int w = Canvas::textWidth(line, 3), x0 = 180 - (LOGO_SIZE + 8 + w) / 2;
+    drawLogo(c, *logo, x0, y + medium + lineHeight(3) / 2 - LOGO_SIZE / 2);
+    c.text(x0 + LOGO_SIZE + 8, y + medium, line, 3, COL_ROUTE);
+  } else c.textCentred(180, y + medium, line, 3, COL_ROUTE);
   snprintf(line, sizeof line, "%s  %s", a.callsign, a.type);
   c.textCentred(180, y + medium + large, line, 2, COL_LABEL);
   snprintf(line, sizeof line, "FL%03d %dkt %03d\xF8", a.alt_ft / 100, (int)a.speed_kt, (int)a.track_deg);
@@ -612,9 +635,23 @@ void Radar::draw(Canvas &c) const {
   for (int i = 0; i < count; i++)
     if (i != selected && project(ac[i], x, y)) drawAircraft(c, *this, ac[i], x, y, false, tag, nullptr);
   c.disc(CENTRE, CENTRE, 2.5f, COL_SWEEP);
+  if (set.clock && clock_min >= 0) {
+    char hm[8];
+    snprintf(hm, sizeof hm, "%02d:%02d%s", clock_min / 60 % 24, clock_min % 60, clock_utc ? "Z" : "");
+    const int w = Canvas::textWidth(hm, 2);
+    c.blendRect(180 - w / 2 - 4, CLOCK_Y, w + 8, lineHeight(2) + 4, COL_CARD, 200);   // a backing, so the axis does not run through the digits
+    c.textCentred(180, CLOCK_Y + 2, hm, 2, COL_SWEEP);
+  }
   if (selected >= 0 && selected < count && project(ac[selected], x, y)) {
-    if (set.card) drawCard(c, ac[selected], y > CENTRE);
+    if (set.card) drawCard(c, ac[selected], y > CENTRE, tag_logo_);
     drawAircraft(c, *this, ac[selected], x, y, true, tag, tag_logo_);
+  }
+  if (alert[0]) {                                                    // on top of everything, and flashing
+    const bool lit = now_ms % 1000 < 500;
+    c.blendRect(ALERT_X0, ALERT_Y, SCREEN_W - 2 * ALERT_X0, ALERT_H, lit ? rgb(150, 0, 0) : rgb(60, 0, 0), 235);
+    c.blendRect(ALERT_X0, ALERT_Y, SCREEN_W - 2 * ALERT_X0, 1, COL_EMERG, 255); c.blendRect(ALERT_X0, ALERT_Y + ALERT_H - 1, SCREEN_W - 2 * ALERT_X0, 1, COL_EMERG, 255);
+    c.textCentred(180, ALERT_Y + 4, alert, 2, rgb(255, 255, 255));
+    c.textCentred(180, ALERT_Y + 6 + lineHeight(2), alert2, 1, rgb(255, 200, 190));
   }
 }
 

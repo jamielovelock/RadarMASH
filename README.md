@@ -39,6 +39,9 @@ Named for Radar O'Reilly, who always heard the choppers first.
     <td align="center"><img src="docs/img/radar-sky.png" width="260" alt="Radar showing several aircraft with trails"><br><sub>Trails follow each aircraft's real path</sub></td>
     <td align="center"><img src="docs/img/radar-green.png" width="260" alt="Radar with a green-tinted map"><br><sub>Green map style</sub></td>
   </tr>
+  <tr>
+    <td align="center" colspan="3"><img src="docs/img/radar-alert.png" width="330" alt="Radar with a red flashing notice: 7700 KLG5, 17 km away, press to look; the aircraft is drawn in red"><br><sub>An emergency squawk (demo traffic), and the clock</sub></td>
+  </tr>
 </table>
 
 ## What it does
@@ -47,6 +50,7 @@ Named for Radar O'Reilly, who always heard the choppers first.
 - A rotating sweep with a fading trail, at a speed you choose.
 - Aircraft flash bright as the sweep passes and fade until it comes round again, like a real display.
 - Range rings, and five ranges from 10 to 160 km on the button.
+- The time of day, with the time zone worked out from where the radar is (or set by hand).
 - Around 30 to 40 frames a second on the device.
 
 **The aircraft, properly identified**
@@ -58,7 +62,14 @@ Named for Radar O'Reilly, who always heard the choppers first.
   climbing or descending, asks a second source when the first does not fit, and shows nothing sooner than something wrong.
 - Trails that follow the path actually flown, turns included.
 - Labels that move out of each other's way when the sky gets busy.
-- Airline logos beside the flight, if you point it at a collection (none are bundled: see [Logos](#logos)).
+- Airline logos beside the flight, in the tag box and on the large card, if you point it at a collection (none are
+  bundled: see [Logos](#logos)).
+
+**Emergencies, anywhere**
+- An aircraft squawking 7700 (emergency), 7600 (radio failure) or 7500 is drawn in red with a pulsing ring.
+- RadarMASH also keeps watch on the whole world for a 7700. When there is one, a notice flashes with the callsign and
+  how far away it is. Press the button and the scope jumps there, map and all, and follows the aircraft; press again
+  to come home. It comes home by itself when the emergency is over.
 
 **A map of where you are**
 - An underlay from standard web map tiles. OpenStreetMap works out of the box with no account or key.
@@ -71,6 +82,8 @@ Named for Radar O'Reilly, who always heard the choppers first.
 - Five fonts, from chunky pixels to the typeface Airbus designed for cockpits.
 - Every feature has its own switch.
 - Settings are stored on the radar and survive restarts and power cuts.
+- Map tiles and logos are kept on the radar too, so after a restart the picture is back at once and the map servers
+  are not asked again.
 
 **Careful with your device**
 - Starts **on trial**: until you choose to keep it, any restart or power cycle returns to the firmware you came from.
@@ -151,6 +164,8 @@ RadarMASH leans on free services run by enthusiasts. Please be gentle with them:
 |---|---|---|
 | Aircraft positions | [adsb.fi](https://adsb.fi), [adsb.lol](https://adsb.lol) | Refreshed every 5 seconds by default. If one stops answering, the other is used. |
 | Airline and route | [adsbdb](https://www.adsbdb.com), then [hexdb](https://hexdb.io) | Looked up once per flight and checked against the aircraft. |
+| Emergency watch | [adsb.fi](https://adsb.fi), [adsb.lol](https://adsb.lol) | Once a minute: is anyone, anywhere, squawking 7700? Can be switched off. |
+| Time zone | [Open-Meteo](https://open-meteo.com) | Asked hourly, with your position rounded to about a kilometre. Set the zone by hand to avoid it. |
 | Map | [OpenStreetMap](https://www.openstreetmap.org/copyright) by default | Its [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) applies. Map data © OpenStreetMap contributors, shown on screen. |
 
 ### Logos
@@ -195,6 +210,7 @@ and that must give exactly the same picture as drawing it whole.
     POST /api/settings            any subset, e.g. {"trails": false, "range_km": 80}
     GET  /api/status              what the radar is doing
     POST /api/press, /api/hold    the button
+    POST /api/alert-test          pretend there is an emergency for three minutes, to try the notice
 
 Values out of range are clamped and anything unrecognised is ignored, so an old page and new firmware get along.
 
@@ -204,8 +220,7 @@ Only fonts that may be redistributed in converted form under their own name are 
 ## Known limits
 
 - Proven on one radar. A second owner's experience would be valuable.
-- Map tiles and logos are kept in memory, so they are fetched again after a restart.
-- Logos appear in the tag box, not on the large detail card.
+- The emergency watch covers 7700 only, and only what the community feeds can see: no coverage, no alert.
 - Route checking catches routes that do not fit the aircraft; a wrong route that happens to look plausible still gets through.
 
 ## Licence and credits

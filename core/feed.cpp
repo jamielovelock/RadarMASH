@@ -99,6 +99,8 @@ int parseAircraft(const char *text, size_t len, double home_lat, double home_lon
     if (a.on_ground && !include_ground) continue;
 
     str(item, "hex", a.hex, sizeof a.hex);
+    char sq[8];
+    if (str(item, "squawk", sq, sizeof sq) && strlen(sq) == 4 && strspn(sq, "01234567") == 4) memcpy(a.squawk, sq, 5);
     if (!str(item, "flight", a.callsign, sizeof a.callsign) && !str(item, "r", a.callsign, sizeof a.callsign))
       snprintf(a.callsign, sizeof a.callsign, "%s", a.hex);
     airlineFromCallsign(a.callsign, a.airline_icao);

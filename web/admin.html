@@ -44,6 +44,8 @@
       <option value="10">10 km</option><option value="20">20 km</option><option value="40">40 km</option><option value="80">80 km</option><option value="160">160 km</option></select>
       <button data-post="/api/press">Next aircraft</button><button data-post="/api/hold">Next range</button></div>
     <div class="row"><span>Sweep speed</span><input type="range" min="2" max="30" data-k="sweep_seconds"><small data-secs="sweep_seconds"></small></div>
+    <div class="row"><span>Clock time zone</span><select data-k="utc_auto" data-bool><option value="true">from your position</option><option value="false">set by hand</option></select>
+      <select data-k="utc_offset_min" data-num id="utcoff"></select></div>
     <div class="checks" id="toggles"></div>
   </section>
 
@@ -94,7 +96,7 @@
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const NAMES = {sweep:'Sweep', rings:'Range rings', labels:'Callsigns', altitude:'Altitude', trails:'Trails', fade:'Fade after sweep',
   shapes:'Aircraft shapes', auto_cycle:'Cycle through aircraft', tag:'Tag box', tag_route:'Tag: route', tag_type:'Tag: type',
-  tag_level:'Tag: level', tag_speed:'Tag: speed', card:'Large card', map:'Map', declutter:'Avoid overlapping labels', logos:'Airline logos'};
+  tag_level:'Tag: level', tag_speed:'Tag: speed', card:'Large card', map:'Map', declutter:'Avoid overlapping labels', logos:'Airline logos', clock:'Clock', alerts:'Emergency alerts (7700, anywhere)'};
 let cfg = {};
 
 function flash() { const s = $('#saved'); s.classList.add('on'); clearTimeout(flash.t); flash.t = setTimeout(() => s.classList.remove('on'), 900); }
@@ -113,11 +115,17 @@ function fill() {
   for (const el of $$('[data-show]')) el.textContent = cfg[el.dataset.show] + '%';
   for (const el of $$('[data-secs]')) el.textContent = 'once round in ' + cfg[el.dataset.secs] + ' s';
   for (const el of $$('#toggles input')) el.checked = !!cfg[el.name];
+  $('#utcoff').hidden = !!cfg.utc_auto;
   if (document.activeElement !== $('#lat') && document.activeElement !== $('#lon') && cfg.home_set) { $('#lat').value = cfg.home_lat; $('#lon').value = cfg.home_lon; }
   if (pick.el) pickDraw();
   $('#homehint').textContent = cfg.home_set ? '' : 'No position set yet, so live aircraft cannot be shown. It is stored on the radar only.';
 }
 function build() {
+  for (let m = -720; m <= 840; m += 30) {                 // UTC-12:00 to UTC+14:00
+    const a = Math.abs(m), o = document.createElement('option');
+    o.value = m; o.textContent = 'UTC' + (m < 0 ? '−' : '+') + String(a / 60 | 0).padStart(2, '0') + ':' + String(a % 60).padStart(2, '0');
+    $('#utcoff').append(o);
+  }
   for (const k of Object.keys(NAMES)) {
     if (!(k in cfg)) continue;
     const l = document.createElement('label'), c = document.createElement('input');

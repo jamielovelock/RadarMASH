@@ -8,6 +8,7 @@
 //   radarmash-sim --shot out.bmp [--t ms] [--select n] [--range km] [--map] [--style 0-2]   write one frame and exit
 // Settings are kept in ~/.config/radarmash/simulator.json, map tiles in ~/.cache/radarmash. Still frames ignore the
 // saved settings and stay offline unless --map, so they always come out the same.
+#include "../core/alert.h"
 #include "../core/config.h"
 #include "../core/radar.h"
 #include "admin_html.h"
@@ -38,6 +39,8 @@ static Radar radar;
 static std::mutex radar_mu;                // the live-data thread and the web requests both touch the radar
 static Config cfg;                         // what the settings page shows and what is saved
 static Live live;
+static Watch watch;                        // the worldwide emergency watch
+static int shot_clock = -1;                // still frames: the time to show, or none
 static SimLogos logos;                     // airline logos, if the settings name a source
 static ScopeCache scope_cache;             // the same speed-up the device uses, so the simulator shows the same picture
 static std::string fake_wifi_ssid;         // stand-ins for the device's Wi-Fi setup, so that page can be developed here
@@ -77,6 +80,7 @@ static std::string settingsPath() {
 
 // Push the configuration into the running radar, feed and map.
 static void applyConfig() {
+  watch.comeHome(radar);                   // settings are about home: if the scope is away looking at an emergency, come back
   bool was_live = live.enabled;
   bool moved = radar.home_lat != cfg.home_lat || radar.home_lon != cfg.home_lon;
   radar.set = cfg.set;
@@ -84,6 +88,8 @@ static void applyConfig() {
   radar.range_km = cfg.range_km;
   live.feed_url = cfg.feed_url; live.refresh_s = cfg.refresh_s; live.include_ground = cfg.include_ground;
   live.enabled = cfg.wantsLive();
+  live.alerts = cfg.set.alerts; live.watch = &watch;
+  live.zone_wanted = cfg.utc_auto && cfg.home_set; live.zone_lat = cfg.home_lat; live.zone_lon = cfg.home_lon;
   tiles.url_template = cfg.map_url;
   tiles.verify_certs = live.verify_certs = logos.verify_certs = cfg.verify_certs;
   logos.url_template = cfg.logo_url;
@@ -113,6 +119,12 @@ static void loadConfig() {
 
 static void render(uint32_t t) {
   if (!live.enabled) demoTraffic(radar, t);
+  watch.tick(radar, t, radar.set.alerts && (live.enabled || !save_settings));
+  if (save_settings) {                     // serving: the real time. Automatic zone not known yet: UTC, marked Z
+    bool zoned = !cfg.utc_auto || live.zone_known;
+    radar.clock_min = (int16_t)clockMinutes((long long)time(nullptr), cfg.utc_auto ? (live.zone_known ? live.zone_min : 0) : cfg.utc_offset_min);
+    radar.clock_utc = !zoned;
+  } else { radar.clock_min = (int16_t)shot_clock; radar.clock_utc = false; }
   ensureMap();
   radar.tick(t);
   radar.cache = &scope_cache;
@@ -175,7 +187,8 @@ static void respond(int fd, const char *type, const void *body, size_t n, int co
 static void respondText(int fd, const std::string &s, const char *type = "text/plain", int code = 200) { respond(fd, type, s.data(), s.size(), code); }
 
 static std::string settingsJson() {
-  cfg.set = radar.set; cfg.range_km = radar.range_km;       // the button can change the range behind the page's back
+  cfg.set = radar.set;
+  if (!watch.away) cfg.range_km = radar.range_km;       // the button can change the range behind the page's back
   char buf[CONFIG_JSON_MAX];
   return std::string(buf, configToJson(cfg, buf, sizeof buf));
 }
@@ -184,9 +197,10 @@ static std::string statusJson() {
   char j[600];
   long age = live.last_ok ? (long)time(nullptr) - live.last_ok : -1;
   snprintf(j, sizeof j, "{\"device\":false,\"version\":\"simulator\",\"live\":%s,\"aircraft\":%d,\"feed_age_s\":%ld,\"feed_error\":\"%s\",\"map_missing\":%d,\"range_km\":%d,"
-           "\"lookups\":%d,\"second_opinions\":%d,\"routes_rejected\":%d,\"logos\":%d,\"logos_missing\":%d}",
+           "\"lookups\":%d,\"second_opinions\":%d,\"routes_rejected\":%d,\"logos\":%d,\"logos_missing\":%d,\"emergency\":\"%s\",\"away\":%s,\"zone_min\":%d}",
            live.enabled ? "true" : "false", radar.count, age, jsonEscape(live.last_error).c_str(), radar.map ? map_image.missing : 0, (int)radar.range_km,
-           live.lookups, live.second_opinions, live.routes_rejected, logos.fetched, logos.missing);
+           live.lookups, live.second_opinions, live.routes_rejected, logos.fetched, logos.missing,
+           watch.have ? jsonEscape(watch.target.callsign).c_str() : "", watch.away ? "true" : "false", live.zone_known ? live.zone_min : -9999);
   return j;
 }
 
@@ -235,14 +249,24 @@ static int serve(int port) {
       else if (path == "/admin") respond(fd, "text/html", ADMIN_HTML, sizeof ADMIN_HTML - 1);
       else if (path == "/api/settings" && !post) respondText(fd, settingsJson(), "application/json");
       else if (path == "/api/settings") {
-        cfg.set = radar.set; cfg.range_km = radar.range_km;
+        cfg.set = radar.set;
+        if (!watch.away) cfg.range_km = radar.range_km;
         if (!configFromJson(body.data(), body.size(), cfg)) respondText(fd, "{\"error\":\"not JSON\"}", "application/json", 400);
         else { applyConfig(); saveConfig(); respondText(fd, settingsJson(), "application/json"); }
       }
       else if (path == "/api/status") respondText(fd, statusJson(), "application/json");
       else if (path == "/api/fonts") { char b[600]; respond(fd, "application/json", b, fontsJson(b, sizeof b)); }
-      else if (path == "/api/press" && post) { radar.shortPress(); respondText(fd, "ok"); }
-      else if (path == "/api/hold" && post) { radar.longPress(); cfg.range_km = radar.range_km; saveConfig(); respondText(fd, "ok"); }
+      else if (path == "/api/press" && post) { if (!watch.press(radar, nowMs())) radar.shortPress(); respondText(fd, "ok"); }
+      else if (path == "/api/hold" && post) { radar.longPress(); if (!watch.away) { cfg.range_km = radar.range_km; saveConfig(); } respondText(fd, "ok"); }
+      // Emergencies are rare, so this pretends there is one (over New York, where there is always traffic) for three
+      // minutes, to try the notice and the button.
+      else if (path == "/api/alert-test" && post) {
+        Aircraft a;
+        snprintf(a.hex, sizeof a.hex, "test01"); snprintf(a.callsign, sizeof a.callsign, "TEST7700"); snprintf(a.squawk, sizeof a.squawk, "7700");
+        a.lat = 40.64; a.lon = -73.78; a.alt_ft = 12000; a.speed_kt = 250; a.track_deg = 40; a.shape = Shape::Narrow;
+        watch = Watch(); watch.found(&a, 1); live.watch_test_until = (long)time(nullptr) + 180;
+        respondText(fd, "ok");
+      }
       else if (path == "/api/reboot" && post) respondText(fd, "ok");            // nothing to restart here
       // The simulator has no Wi-Fi to set up; these stand in for the device so the setup page can be worked on here.
       // Any password joins, except "wrongpass", which fails the way a bad password does.
@@ -272,7 +296,8 @@ int main(int argc, char **argv) {
   const char *shot = nullptr; uint32_t t = 2600; int select = -1, port = 8360, style = -1; float range = 0;
   bool want_map = false, no_map = false, want_live = false, have_home = false;
   const char *font = nullptr;
-  int detail = -1;
+  int detail = -1, alert_demo = -1;
+  bool want_card = false;
   double home_lat = 0, home_lon = 0;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -287,6 +312,9 @@ int main(int argc, char **argv) {
     else if (a == "--font" && i + 1 < argc) font = argv[++i];
     else if (a == "--detail" && i + 1 < argc) detail = atoi(argv[++i]);
     else if (a == "--live") want_live = true;
+    else if (a == "--card") want_card = true;
+    else if (a == "--alert" && i + 1 < argc) alert_demo = atoi(argv[++i]);      // still frames: this demo aircraft squawks 7700
+    else if (a == "--clock" && i + 1 < argc) { int hh, mm; if (sscanf(argv[++i], "%d:%d", &hh, &mm) == 2) shot_clock = (hh % 24) * 60 + mm % 60; }
     else if (a == "--home" && i + 1 < argc) have_home = sscanf(argv[++i], "%lf,%lf", &home_lat, &home_lon) == 2;
     else {
       fprintf(stderr, "usage: %s [--port n] [--live --home lat,lon] [--no-map]\n       %s --shot out.bmp [--t ms] [--select n] [--range km] [--map] [--style 0-2] [--font id]\n", argv[0], argv[0]);
@@ -321,6 +349,11 @@ int main(int argc, char **argv) {
   radar.set.auto_cycle = false;          // a still frame shows exactly the aircraft asked for
   demoTraffic(radar, t);
   radar.selected = select;
+  if (want_card) radar.set.card = true;
+  if (alert_demo >= 0 && alert_demo < radar.count) {
+    snprintf(radar.ac[alert_demo].squawk, sizeof radar.ac[alert_demo].squawk, "7700");
+    watch.found(&radar.ac[alert_demo], 1);
+  }
   render(t);
   auto b = bmp();
   FILE *f = fopen(shot, "wb");

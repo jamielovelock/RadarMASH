@@ -3,6 +3,7 @@
 //
 // Simulator live data: a background thread that polls an aircraft feed and looks up routes, using curl.
 #pragma once
+#include "../core/alert.h"
 #include "../core/feed.h"
 #include <map>
 #include <mutex>
@@ -18,6 +19,13 @@ struct Live {
   bool routes = true;
   bool verify_certs = true;     // off: pass -k to curl
   bool enabled = false;         // poll only while this is set (live mode)
+  bool alerts = false;          // keep the worldwide emergency watch (only while enabled)
+  rm::Watch *watch = nullptr;   // where its findings go
+  long watch_test_until = 0;    // a pretend emergency is being shown until this time: leave it alone
+  bool zone_wanted = false;     // look up the time zone for zone_lat, zone_lon
+  double zone_lat = 0, zone_lon = 0;
+  bool zone_known = false;      // result: zone_min is minutes ahead of UTC there, now
+  int zone_min = 0;
   void (*background)() = nullptr;   // extra work for this thread each cycle (the simulator fetches logos here)
 
   // status, for the page
@@ -42,6 +50,10 @@ private:
   void run();
   void poll();
   void lookupSome();
+  void watchWorld();
+  void lookupZone();
+  long watched_at_ = 0, zone_at_ = 0;
+  double zone_for_lat_ = 1e9, zone_for_lon_ = 1e9;
 };
 
 // Fetch a URL with curl (no shell). Returns false if curl failed; `body` holds the reply either way.

@@ -25,6 +25,8 @@ struct Config {
   char map_credit[28];
   char logo_url[128];                 // where airline logos come from, with {icao} in it; empty (the default) for none
   uint8_t brightness = 100;           // backlight, percent
+  bool utc_auto = true;               // clock: take the time zone from the position (needs home_set); otherwise use utc_offset_min
+  int16_t utc_offset_min = 0;         // clock: minutes ahead of UTC, when not automatic
   bool verify_certs = true;           // check the security certificates of https sources (turn off only for your own server)
 
   Config();
@@ -45,6 +47,6 @@ bool parseWifiRequest(const char *text, size_t len, char ssid[33], char pass[65]
 // Text made safe to put inside a JSON string (network names can contain anything).
 size_t jsonEscape(const char *in, char *out, size_t out_size);
 
-constexpr size_t CONFIG_JSON_MAX = 1760;   // a buffer this big always fits configToJson
+constexpr size_t CONFIG_JSON_MAX = 1900;   // a buffer this big always fits configToJson
 
 }  // namespace rm

@@ -152,3 +152,26 @@ TEST(tag_box_shows_the_logo) {
   r->tick(9005);
   CHECK(count(render(*r, SCREEN_H), magenta) == 0 && logos.asked == before);
 }
+
+TEST(large_card_shows_the_logo) {
+  std::unique_ptr<Radar> r(new Radar());
+  r->home_lat = 51; r->home_lon = -1; r->set.auto_cycle = false; r->set.sweep = false;
+  r->set.card = true; r->set.tag = false;
+  demoTraffic(*r, 9000); r->tick(9000);
+  r->selected = 0;                                              // RDR4077
+  const uint16_t magenta = rgb(255, 0, 255);
+  CHECK(count(render(*r, SCREEN_H), magenta) == 0);
+  FakeLogos logos;
+  r->logos = &logos;
+  r->tick(9001);
+  Pixels with = render(*r, SCREEN_H);
+  CHECK(count(with, magenta) == LOGO_SIZE * LOGO_SIZE);          // beside the route, whole
+  CHECK(with == render(*r, 40) && with == render(*r, 7));
+  r->set.tag = true;                                            // card and tag box together: one logo in each
+  r->tick(9002);
+  Pixels both = render(*r, SCREEN_H);
+  CHECK(count(both, magenta) > LOGO_SIZE * LOGO_SIZE && both == render(*r, 40));
+  r->set.logos = false;
+  r->tick(9003);
+  CHECK(count(render(*r, SCREEN_H), magenta) == 0);
+}

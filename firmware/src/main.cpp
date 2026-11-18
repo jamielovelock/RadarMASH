@@ -18,6 +18,7 @@
 #include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
+#include <LittleFS.h>
 #include <PNGdec.h>
 #include <Preferences.h>
 #include <WebServer.h>
@@ -33,6 +34,7 @@
 #include <mbedtls/sha256.h>
 
 #include "admin_html.h"
+#include "alert.h"
 #include "config.h"
 #include "feed.h"
 #include "panel_init.h"
@@ -67,6 +69,10 @@ static void touch();                                // marks deliberate use of t
 static uint32_t frame_ms = 0, frames = 0;
 static int brightness = 1023;
 static char boot_note[40] = "", note2[34] = "", note3[34] = "";   // up to three lines of message over the radar
+static bool live_mode = false;
+static Watch watch;                                 // the worldwide emergency watch (see alert.h); guarded by the radar lock
+static bool clock_auto = true, zone_known = false;  // the clock: time zone from the position, and whether it has been found yet
+static int clock_offset_min = 0, zone_min = 0;
 
 // True only if the external memory chip really answered and is usable as heap (the Arduino flag alone is not proof).
 static bool psramOk() { return esp_psram_is_initialized() && heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0; }
@@ -198,6 +204,9 @@ static void drawFrame(bool demo) {
   frame_ms = t0 - last_start; last_start = t0;             // time from one frame to the next, sending included
   Lock lock;
   if (demo) demoTraffic(radar, t0);
+  watch.tick(radar, t0, radar.set.alerts && live_mode);
+  radar.clock_min = (int16_t)clockMinutes((long long)time(nullptr), clock_auto ? (zone_known ? zone_min : 0) : clock_offset_min);
+  radar.clock_utc = clock_auto && !zone_known;       // zone not found yet: UTC, marked Z
   radar.tick(t0);
   radar.prepare();
   for (int y0 = 0; y0 < SCREEN_H; y0 += BAND_ROWS) {
@@ -240,7 +249,6 @@ static void goHome() {
 }
 
 // ---- live data (its own task, so a slow reply never freezes the sweep) ----
-static bool live_mode = false;
 static int refresh_s = 5;
 static int feed_count = -1, feed_errors = 0, feed_failing = 0, lookups = 0;
 static uint32_t feed_ok_ms = 0;
@@ -286,6 +294,7 @@ static void pollFeed() {
   int n = httpsGet(url, body) ? parseAircraft(body.c_str(), body.length(), lat, lon, include_ground, fresh, limit) : -1;
   body = String();
   Lock lock;
+  if (radar.home_lat != lat || radar.home_lon != lon) return;   // the scope moved while this was being fetched: wrong sky
   if (n < 0) {
     feed_errors++;
     if (++feed_failing >= 2 && feed_url == url_before) {
@@ -380,6 +389,150 @@ static void lookupOneRoute() {
   }
 }
 
+static bool fetchBytes(const String &url, uint8_t *&data, int &len);
+
+// ---- the emergency watch and the time zone ----
+static uint32_t watched_ms = 0, watch_test_until = 0, zone_ms = 0;
+static int watch_polls = 0;
+static Aircraft *watch_list = nullptr;
+static const int WATCH_LIST = 8;
+
+static void watchWorld() {
+  bool want; double lat, lon;
+  uint32_t now = millis();
+  { Lock lock; want = radar.set.alerts && live_mode && !(watch_test_until && (int32_t)(now - watch_test_until) < 0);
+    lat = watch.away ? watch.back_lat : radar.home_lat; lon = watch.away ? watch.back_lon : radar.home_lon; }
+  if (!want || (watched_ms && now - watched_ms < (uint32_t)WATCH_EVERY_S * 1000UL)) return;
+  watched_ms = now | 1;
+  if (!watch_list) {
+    watch_list = (Aircraft *)heap_caps_malloc(sizeof(Aircraft) * WATCH_LIST, psramOk() ? MALLOC_CAP_SPIRAM : MALLOC_CAP_DEFAULT);
+    if (!watch_list) return;
+    for (int i = 0; i < WATCH_LIST; i++) new (&watch_list[i]) Aircraft();
+  }
+  String body;
+  int n = httpsGet(WATCH_ADSB_FI, body) ? parseAircraft(body.c_str(), body.length(), lat, lon, false, watch_list, WATCH_LIST) : -1;
+  if (n < 0) { body = String(); n = httpsGet(WATCH_ADSB_LOL, body) ? parseAircraft(body.c_str(), body.length(), lat, lon, false, watch_list, WATCH_LIST) : -1; }
+  body = String();
+  if (n < 0) return;                                 // no answer is not the same as all clear
+  for (int i = 1; i < n; i++)                        // the nearest to home is the one offered
+    if (distanceKm(lat, lon, watch_list[i].lat, watch_list[i].lon) < distanceKm(lat, lon, watch_list[0].lat, watch_list[0].lon)) {
+      Aircraft t = watch_list[0]; watch_list[0] = watch_list[i]; watch_list[i] = t;
+    }
+  Lock lock;
+  watch_polls++;
+  if (!(watch_test_until && (int32_t)(millis() - watch_test_until) < 0)) watch.found(watch_list, n);
+}
+
+// The time zone where the radar is: asked for when the position changes, and hourly after that (summer time moves it).
+static bool zone_wanted = false;
+static double zone_lat = 0, zone_lon = 0, zone_for_lat = 1e9, zone_for_lon = 1e9;
+static void lookupZone() {
+  bool want; double lat, lon;
+  { Lock lock; want = zone_wanted; lat = zone_lat; lon = zone_lon; if (!want) zone_known = false; }
+  bool moved = lat != zone_for_lat || lon != zone_for_lon;
+  uint32_t now = millis();
+  if (!want || (!moved && zone_ms && now - zone_ms < 3600000UL)) return;
+  zone_for_lat = lat; zone_for_lon = lon;
+  String url = ZONE_OPEN_METEO, body;
+  url.replace("{lat}", String(lat, 2)); url.replace("{lon}", String(lon, 2));     // to about a kilometre: all a time zone needs
+  int minutes = 0;
+  bool ok = httpsGet(url, body) && parseUtcOffset(body.c_str(), body.length(), minutes);
+  Lock lock;
+  if (ok) { zone_known = true; zone_min = minutes; zone_ms = now | 1; }
+  else { if (moved) zone_known = false; zone_ms = (now - 3300000UL) | 1; }         // try again in five minutes
+}
+
+// ---- keeping map tiles and logos across restarts ----
+// The device has a small filesystem that the original firmware also uses. RadarMASH keeps its downloads there in a
+// folder of its own, within a fixed allowance, and never formats or touches anything else: if the filesystem cannot be
+// opened as it stands, there is simply no cache.
+static bool fs_ok = false;
+static uint32_t cache_bytes = 0;
+static int cache_files = 0, cache_hits = 0, cache_writes = 0, cache_evictions = 0;
+static const uint32_t CACHE_MAX_BYTES = 1536UL * 1024UL, CACHE_KEEP_FREE = 512UL * 1024UL;
+static const time_t CACHE_STALE_S = 30L * 24L * 3600L;      // older than this: fetch a fresh copy when the network allows
+
+static uint32_t hashText(const String &s) { uint32_t h = 2166136261u; for (size_t i = 0; i < s.length(); i++) h = (h ^ (uint8_t)s[i]) * 16777619u; return h; }
+
+static void cacheSetup() {
+  fs_ok = LittleFS.begin(false, "/fs", 6, "storage");       // false: never format
+  if (!fs_ok) return;
+  LittleFS.mkdir("/rm");
+  File dir = LittleFS.open("/rm");
+  if (!dir || !dir.isDirectory()) { fs_ok = false; return; }
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) { cache_bytes += f.size(); cache_files++; }
+}
+
+// Reads a kept file into PSRAM. `stale` says it is old enough to be worth replacing.
+static bool cacheRead(const char *path, uint8_t *&data, int &len, bool &stale) {
+  stale = false;
+  if (!fs_ok) return false;
+  File f = LittleFS.open(path, "r");
+  if (!f) return false;
+  len = (int)f.size();
+  time_t written = f.getLastWrite(), now = time(nullptr);
+  bool ok = len > 0 && len <= 300000 && (data = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM)) != nullptr;
+  if (ok && (int)f.read(data, len) != len) { heap_caps_free(data); data = nullptr; ok = false; }
+  f.close();
+  if (ok) { cache_hits++; stale = now > 1700000000 && written > 1700000000 && now - written > CACHE_STALE_S; }
+  return ok;
+}
+
+static void cacheRemove(const char *path) {
+  if (!fs_ok) return;
+  File f = LittleFS.open(path, "r");
+  if (!f) return;
+  uint32_t size = f.size();
+  f.close();
+  if (LittleFS.remove(path)) { cache_bytes -= size > cache_bytes ? cache_bytes : size; if (cache_files) cache_files--; }
+}
+
+static bool cacheEvictOldest() {
+  File dir = LittleFS.open("/rm");
+  if (!dir) return false;
+  String oldest; time_t when = 0;
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    time_t w = f.getLastWrite();
+    if (!oldest.length() || w < when) { oldest = String("/rm/") + f.name(); when = w; }
+  }
+  if (!oldest.length()) return false;
+  cacheRemove(oldest.c_str());
+  cache_evictions++;
+  return true;
+}
+
+static void cacheWrite(const char *path, const uint8_t *data, int len) {
+  if (!fs_ok || len <= 0 || (uint32_t)len > CACHE_MAX_BYTES / 4) return;
+  cacheRemove(path);                                 // replacing a stale copy
+  for (int guard = 0; guard < 64; guard++) {         // make room within our allowance, leaving the rest of the filesystem alone
+    uint32_t free_bytes = LittleFS.totalBytes() - LittleFS.usedBytes();
+    if (cache_bytes + (uint32_t)len <= CACHE_MAX_BYTES && free_bytes >= CACHE_KEEP_FREE + (uint32_t)len) break;
+    if (!cacheEvictOldest()) return;
+  }
+  if (cache_bytes + (uint32_t)len > CACHE_MAX_BYTES || LittleFS.totalBytes() - LittleFS.usedBytes() < CACHE_KEEP_FREE + (uint32_t)len) return;
+  File f = LittleFS.open(path, "w");
+  if (!f) return;
+  bool ok = (int)f.write(data, len) == len;
+  f.close();
+  if (ok) { cache_bytes += len; cache_files++; cache_writes++; }
+  else LittleFS.remove(path);
+}
+
+// A download, or the kept copy of it. A stale copy is replaced if the network obliges and used if it does not.
+static bool fetchCached(const char *path, const String &url, uint8_t *&data, int &len, bool keep, bool &from_cache) {
+  bool stale = false;
+  from_cache = cacheRead(path, data, len, stale);
+  if (from_cache && !stale) return true;
+  uint8_t *fresh_data = nullptr; int fresh_len = 0;
+  if (WiFi.status() == WL_CONNECTED && fetchBytes(url, fresh_data, fresh_len)) {
+    if (from_cache) heap_caps_free(data);
+    data = fresh_data; len = fresh_len; from_cache = false;
+    if (keep) cacheWrite(path, data, len);
+    return true;
+  }
+  return from_cache;
+}
+
 // ---- map underlay (needs PSRAM) ----
 // Tiles are fetched over HTTPS as PNG, decoded one at a time, and composed into a picture the radar draws over. Raw
 // tiles are kept in memory while the device is up, so changing range and coming back does not download them again.
@@ -431,6 +584,7 @@ static bool fetchBytes(const String &url, uint8_t *&data, int &len) {
 }
 
 struct DeviceTiles : TileSource {
+  char last_path[48];
   const uint16_t *tile(int z, int x, int y) override {
     RawTile *t = nullptr;
     for (RawTile &r : raw_tiles) if (r.data && r.z == z && r.x == x && r.y == y) { t = &r; break; }
@@ -438,8 +592,11 @@ struct DeviceTiles : TileSource {
       String url = map_url;
       url.replace("{z}", String(z)); url.replace("{x}", String(x)); url.replace("{y}", String(y)); url.replace("{s}", "a");
       uint8_t *data = nullptr; int len = 0;
-      if (!fetchBytes(url, data, len)) { map_tiles_failed++; return nullptr; }
-      map_tiles_fetched++;
+      bool cached = false, keep;
+      { Lock lock; keep = !watch.away; }                     // a visit to an emergency somewhere is not worth keeping
+      snprintf(last_path, sizeof last_path, "/rm/t%08x_%d_%d_%d", (unsigned)hashText(map_url), z, x, y);
+      if (!fetchCached(last_path, url, data, len, keep, cached)) { map_tiles_failed++; return nullptr; }
+      if (!cached) map_tiles_fetched++;
       t = &raw_tiles[raw_next]; raw_next = (raw_next + 1) % (int)(sizeof raw_tiles / sizeof raw_tiles[0]);
       if (t->data) heap_caps_free(t->data);
       *t = RawTile{z, x, y, data, len};
@@ -449,7 +606,11 @@ struct DeviceTiles : TileSource {
       ok = png->getWidth() == TILE_SIZE && png->getHeight() == TILE_SIZE && png->decode(nullptr, 0) == PNG_SUCCESS;
       png->close();
     }
-    if (!ok) { map_decode_failed++; heap_caps_free(t->data); t->data = nullptr; }   // do not keep a tile we cannot read
+    if (!ok) {                                               // do not keep a tile we cannot read, in memory or in flash
+      map_decode_failed++; heap_caps_free(t->data); t->data = nullptr;
+      snprintf(last_path, sizeof last_path, "/rm/t%08x_%d_%d_%d", (unsigned)hashText(map_url), z, x, y);
+      cacheRemove(last_path);
+    }
     return ok ? tile_px : nullptr;
   }
 };
@@ -558,7 +719,10 @@ static void fetchOneLogo() {
   url.replace("{icao}", icao);
   uint8_t *data = nullptr; int len = 0;
   Logo *made = nullptr;
-  if (fetchBytes(url, data, len)) {
+  char path[40];
+  bool cached = false, online = WiFi.status() == WL_CONNECTED;
+  snprintf(path, sizeof path, "/rm/l%08x_%s", (unsigned)hashText(tmpl), icao);
+  if (fetchCached(path, url, data, len, true, cached)) {
     if (png->openRAM(data, len, logoLine) == PNG_SUCCESS) {
       LogoJob job{nullptr, png->getWidth(), png->getHeight(), true};
       if (job.w >= 1 && job.h >= 1 && job.w <= 320 && job.h <= 320 && (job.rgba = (uint8_t *)heap_caps_calloc((size_t)job.w * job.h, 4, MALLOC_CAP_SPIRAM)) != nullptr) {
@@ -571,7 +735,9 @@ static void fetchOneLogo() {
       png->close();
     }
     heap_caps_free(data);
+    if (!made) cacheRemove(path);                            // not a picture we can use: do not keep it
   }
+  if (!made && !online) return;                              // no network yet: that is not the same as having no logo
   Lock lock;
   for (DeviceLogos::Entry &e : device_logos.entries) {
     if (e.state != DeviceLogos::WANTED || strcmp(e.icao, icao) != 0) continue;
@@ -588,7 +754,8 @@ static void feedTask(void *) {
   for (int i = 0; fresh && i < MAX_AIRCRAFT; i++) new (&fresh[i]) Aircraft();
   for (;;) {
     uint32_t began = millis();
-    if (WiFi.status() == WL_CONNECTED) { updateMap(); fetchOneLogo(); }
+    updateMap(); fetchOneLogo();                             // these can work from the kept copies before Wi-Fi is up
+    if (WiFi.status() == WL_CONNECTED) { lookupZone(); watchWorld(); }
     if (fresh && live_mode && WiFi.status() == WL_CONNECTED) { pollFeed(); lookupOneRoute(); }
     uint32_t every = (uint32_t)constrain(refresh_s, 2, 300) * 1000UL, took = millis() - began;
     vTaskDelay(pdMS_TO_TICKS(took < every ? every - took : 200));
@@ -818,6 +985,9 @@ static uint32_t cfg_dirty_ms = 0;
 static uint32_t fps = 0;
 
 static void applyConfig() {                         // caller holds the lock (or nothing else is running yet)
+  watch.comeHome(radar);                            // settings are about home: if the scope is away at an emergency, come back
+  clock_auto = cfg.utc_auto; clock_offset_min = cfg.utc_offset_min;
+  zone_wanted = cfg.utc_auto && cfg.home_set; zone_lat = cfg.home_lat; zone_lon = cfg.home_lon;
   bool was_live = live_mode, moved = radar.home_lat != cfg.home_lat || radar.home_lon != cfg.home_lon;
   radar.set = cfg.set;
   radar.home_lat = cfg.home_lat; radar.home_lon = cfg.home_lon;
@@ -835,7 +1005,8 @@ static void applyConfig() {                         // caller holds the lock (or
 static void markDirty() { cfg_dirty = true; cfg_dirty_ms = millis(); }
 
 static size_t currentConfigJson(char *buf, size_t n) {   // caller holds the lock
-  cfg.set = radar.set; cfg.range_km = radar.range_km;    // the button changes these behind the page's back
+  cfg.set = radar.set;                                   // the button changes these behind the page's back
+  if (!watch.away) cfg.range_km = radar.range_km;        // (the range while away at an emergency is not the user's choice)
   return configToJson(cfg, buf, n);
 }
 static void saveConfigIfDue() {
@@ -889,6 +1060,10 @@ static void hStatus() {
   j += ",\"map_tiles\":" + String(map_tiles_fetched) + ",\"map_tile_failures\":" + String(map_tiles_failed) + ",\"map_decode_failures\":" + String(map_decode_failed);
   j += ",\"time_set\":" + String(time(nullptr) > 1700000000 ? "true" : "false") + ",\"verify_certs\":" + String(verify_certs ? "true" : "false");
   j += ",\"logos\":" + String(logos_loaded) + ",\"logos_missing\":" + String(logos_missing);
+  j += ",\"fs\":" + String(fs_ok ? "true" : "false") + ",\"cache_files\":" + String(cache_files) + ",\"cache_kb\":" + String(cache_bytes / 1024) + ",\"cache_hits\":" + String(cache_hits);
+  j += ",\"cache_writes\":" + String(cache_writes) + ",\"cache_evictions\":" + String(cache_evictions) + ",\"fs_free_kb\":" + String(fs_ok ? (unsigned)((LittleFS.totalBytes() - LittleFS.usedBytes()) / 1024) : 0);
+  j += ",\"emergency\":\"" + String(watch.have ? watch.target.callsign : "") + "\",\"away\":" + String(watch.away ? "true" : "false") + ",\"watch_polls\":" + String(watch_polls);
+  j += ",\"zone_min\":" + String(zone_known ? zone_min : -9999);
   j += ",\"panel_err\":" + String((int)panel_err) + ",\"cache\":" + String(radar.cache ? "true" : "false");
   j += ",\"psram\":" + String(psramOk() ? "true" : "false") + ",\"psram_free\":" + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   j += ",\"reset_reason\":" + String((int)esp_reset_reason()) + ",\"uptime_ms\":" + String(millis());
@@ -908,7 +1083,8 @@ static void hSettingsPost() {
   bool good;
   {
     Lock lock;
-    cfg.set = radar.set; cfg.range_km = radar.range_km;
+    cfg.set = radar.set;
+    if (!watch.away) cfg.range_km = radar.range_km;
     good = configFromJson(body.c_str(), body.length(), cfg);
     if (good) { applyConfig(); currentConfigJson(buf, sizeof buf); }
   }
@@ -918,7 +1094,17 @@ static void hSettingsPost() {
   server.send(200, "application/json", buf);
 }
 static void hFonts() { char b[600]; fontsJson(b, sizeof b); server.send(200, "application/json", b); }
-static void hPress() { touch(); { Lock lock; radar.shortPress(); } ok(); }
+static void hPress() { touch(); { Lock lock; if (!watch.press(radar, millis())) radar.shortPress(); } ok(); }
+// Emergencies are rare, so this pretends there is one (over New York, where there is always traffic) for three minutes,
+// to try the notice and the button.
+static void hAlertTest() {
+  touch();
+  Aircraft a;
+  snprintf(a.hex, sizeof a.hex, "test01"); snprintf(a.callsign, sizeof a.callsign, "TEST7700"); snprintf(a.squawk, sizeof a.squawk, "7700");
+  a.lat = 40.64; a.lon = -73.78; a.alt_ft = 12000; a.speed_kt = 250; a.track_deg = 40; a.shape = Shape::Narrow;
+  { Lock lock; watch.comeHome(radar); watch = Watch(); watch.found(&a, 1); watch_test_until = (millis() + 180000UL) | 1; }
+  ok();
+}
 static void hHold() { touch(); { Lock lock; radar.longPress(); } markDirty(); ok(); }
 
 // Exercise the external memory chip: write a pattern across a block, read it back, and time both.
@@ -994,6 +1180,7 @@ void setup() {
 
   radar_mu = xSemaphoreCreateMutex();
   radar.logos = &device_logos;
+  cacheSetup();
   loadConfig();                                                // saved settings, before anything is drawn
   if (psramOk()) {                                             // with the external memory, keep the still background ready
     void *mem = heap_caps_malloc(sizeof(ScopeCache), MALLOC_CAP_SPIRAM);
@@ -1069,6 +1256,7 @@ void setup() {
   server.on("/api/fonts", hFonts);
   server.on("/api/press", HTTP_POST, hPress);
   server.on("/api/hold", HTTP_POST, hHold);
+  server.on("/api/alert-test", HTTP_POST, hAlertTest);
   server.on("/api/reboot", HTTP_POST, hReboot);
   server.on("/reboot", hReboot);
   server.on("/perf", hPerf);
@@ -1100,7 +1288,7 @@ void loop() {
   if (raw != btn_down && now - btn_change_ms > 30) {
     btn_down = raw; last_activity_ms = now;
     if (btn_down) { btn_down_ms = now; long_done = false; }
-    else if (!long_done) { Lock lock; radar.shortPress(); }
+    else if (!long_done) { Lock lock; if (!watch.press(radar, now)) radar.shortPress(); }
   }
   if (btn_down && !long_done && now - btn_down_ms > 700) { long_done = true; { Lock lock; radar.longPress(); } markDirty(); }
   if (btn_down && now - btn_down_ms > 8000) { snprintf(boot_note, sizeof boot_note, "back to other firmware"); drawFrame(!live_mode); delay(150); goHome(); }
